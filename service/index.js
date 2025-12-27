@@ -9,30 +9,25 @@ import { User } from './models.js';
 dotenv.config();
 
 const app = express();
-// Use environment PORT for Railway, fallback to 5000 for local
 const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'injazi-secret';
 
 // --- CORS Configuration ---
-// Allow frontend origin (set FRONTEND_URL in Render to your Vercel URL)
 const allowedOrigins = [process.env.FRONTEND_URL, 'http://localhost:3000', 'https://injazi.vercel.app'].filter(Boolean);
 
 app.use(cors({ 
   origin: function(origin, callback) {
-    // Allow requests with no origin (e.g., server-to-server, curl)
     if (!origin) return callback(null, true);
     if (allowedOrigins.indexOf(origin) !== -1) {
       return callback(null, true);
     }
-    console.warn(`❌ CORS blocked origin: ${origin}. Allowed: ${allowedOrigins.join(', ')}`);
+    console.warn(`❌ CORS blocked origin: ${origin}`);
     return callback(new Error('CORS policy: This origin is not allowed.'));
   },
   credentials: true
 }));
 
-// respond to preflight requests
 app.options('*', cors());
-
 app.use(express.json({ limit: '50mb' }));
 
 // --- DATABASE ---
@@ -42,7 +37,7 @@ mongoose.connect(process.env.MONGODB_URI)
 
 const generateToken = (id) => jwt.sign({ id }, JWT_SECRET, { expiresIn: '30d' });
 
-// --- HEALTH CHECK ROUTE ---
+// --- HEALTH CHECK ---
 app.get('/', (req, res) => {
   res.json({ 
     message: 'InJazi API is running!',
@@ -90,16 +85,64 @@ app.post('/api/auth', async (req, res) => {
   }
 });
 
-// --- SYNC ROUTE ---
+// --- IMPROVED SYNC ROUTE ---
 app.post('/api/sync', async (req, res) => {
   const { email, ...updates } = req.body;
-  if (!email) return res.status(400).json({ message: 'No email provided' });
+  
+  if (!email) {
+    return res.status(400).json({ message: 'No email provided' });
+  }
+
   try {
-    await User.findOneAndUpdate({ email }, { $set: updates }, { new: true });
-    res.json({ success: true });
+    console.log("📥 Sync request for:", email);
+    
+    // Build the update object properly for nested fields
+    const updateFields = {};
+    
+    for (const [key, value] of Object.entries(updates)) {
+      if (value !== undefined && value !== null) {
+        updateFields[key] = value;
+      }
+    }
+
+    // Log what we're saving (for debugging)
+    if (updateFields.goal) {
+      console.log("📚 Syncing goal with curriculum:", 
+        updateFields.goal.savedCurriculum?.length || 0, "chapters");
+    }
+
+    const updatedUser = await User.findOneAndUpdate(
+      { email },
+      { $set: updateFields },
+      { new: true, runValidators: true }
+    );
+
+    if (!updatedUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    console.log("✅ Sync successful for:", email);
+    res.json({ success: true, message: 'Data synced successfully' });
+
   } catch (error) {
-    console.error('Sync Error:', error);
-    res.status(500).json({ message: 'Sync failed' });
+    console.error('❌ Sync Error:', error);
+    res.status(500).json({ message: 'Sync failed', error: error.message });
+  }
+});
+
+// --- GET USER DATA (for refreshing from server) ---
+app.get('/api/user/:email', async (req, res) => {
+  try {
+    const user = await User.findOne({ email: req.params.email });
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    const userData = user.toObject();
+    delete userData.password;
+    res.json({ user: userData });
+  } catch (error) {
+    console.error('Get User Error:', error);
+    res.status(500).json({ message: 'Server error' });
   }
 });
 
@@ -117,4 +160,3 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 SERVER RUNNING ON PORT ${PORT}`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
 });
-
