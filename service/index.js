@@ -14,15 +14,24 @@ const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'injazi-secret';
 
 // --- CORS Configuration ---
-// Allow frontend origin (update after Vercel deployment)
-const allowedOrigins = process.env.FRONTEND_URL 
-  ? [process.env.FRONTEND_URL, 'http://localhost:3000', 'http://localhost:5173']
-  : ['*'];
+// Allow frontend origin (set FRONTEND_URL in Render to your Vercel URL)
+const allowedOrigins = [process.env.FRONTEND_URL, 'http://localhost:3000', 'https://inajzi.vercel.app/'].filter(Boolean);
 
 app.use(cors({ 
-  origin: allowedOrigins,
-  credentials: true 
+  origin: function(origin, callback) {
+    // Allow requests with no origin (e.g., server-to-server, curl)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      return callback(null, true);
+    }
+    console.warn(`❌ CORS blocked origin: ${origin}. Allowed: ${allowedOrigins.join(', ')}`);
+    return callback(new Error('CORS policy: This origin is not allowed.'));
+  },
+  credentials: true
 }));
+
+// respond to preflight requests
+app.options('*', cors());
 
 app.use(express.json({ limit: '50mb' }));
 
