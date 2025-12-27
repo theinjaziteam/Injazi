@@ -15,7 +15,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'injazi-secret';
 
 // --- CORS Configuration ---
 // Allow frontend origin (set FRONTEND_URL in Render to your Vercel URL)
-const allowedOrigins = [process.env.FRONTEND_URL, 'http://localhost:3000', 'https://inajzi.vercel.app/'].filter(Boolean);
+const allowedOrigins = [process.env.FRONTEND_URL, 'http://localhost:3000', 'https://injazi.vercel.app'].filter(Boolean);
 
 app.use(cors({ 
   origin: function(origin, callback) {
@@ -117,3 +117,4 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 SERVER RUNNING ON PORT ${PORT}`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
 });
+
