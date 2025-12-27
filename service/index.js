@@ -15,7 +15,8 @@ const JWT_SECRET = process.env.JWT_SECRET || 'injazi-secret';
 // --- CORS Configuration ---
 const allowedOrigins = [
   process.env.FRONTEND_URL, 
-  'http://localhost:3000', 
+  'http://localhost:3000',
+  'https://api.groq.com/openai/v1/chat/completions',
   'http://localhost:5173',  // Vite default
   'https://injazi.vercel.app'
 ].filter(Boolean);
@@ -210,3 +211,4 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`📡 Allowed Origins: ${allowedOrigins.join(', ')}`);
 });
+
