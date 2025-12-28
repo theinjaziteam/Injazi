@@ -50,7 +50,36 @@ const GoalSchema = new mongoose.Schema({
 });
 
 // ============================================
-// ADGEM TRANSACTION SCHEMA
+// ADGEM OFFER SCHEMA (Cached offers from API)
+// ============================================
+const AdgemOfferSchema = new mongoose.Schema({
+    odId visibleId: String,
+    
+    storeId: String,
+    trackingType: String,
+    epc: String,
+    icon: String,
+    name: String,
+    clickUrl: String,
+    instructions: String,
+    description: String,
+    shortDescription: String,
+    category1: String,
+    category2: String,
+    amount: Number,
+    completionDifficulty: Number,
+    renderSticker: Boolean,
+    stickerText: String,
+    stickerColor: String,
+    os: {
+        android: Boolean,
+        ios: Boolean,
+        web: Boolean
+    }
+});
+
+// ============================================
+// ADGEM TRANSACTION SCHEMA (Completed offers)
 // ============================================
 const AdgemTransactionSchema = new mongoose.Schema({
     transactionId: { type: String, required: true },
@@ -96,7 +125,9 @@ const UserSchema = new mongoose.Schema({
     dailyTasks: [TaskSchema],
     
     // AdGem Integration
+    adgemOffers: [AdgemOfferSchema],
     adgemTransactions: [AdgemTransactionSchema],
+    adgemLastSync: Number,
     
     // Flexible Collections
     chatHistory: { type: Array, default: [] },
