@@ -5,6 +5,9 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
 import { User } from './models.js';
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const GROQ_MODEL = 'llama-3.3-70b-versatile';
 
 dotenv.config();
 
@@ -15,6 +18,306 @@ const PORT = process.env.PORT || 5000;
 const MONGODB_URI = process.env.MONGODB_URI;
 const ADGEM_APP_ID = process.env.ADGEM_APP_ID;
 const ADGEM_POSTBACK_KEY = process.env.ADGEM_POSTBACK_KEY;
+
+// ============================================
+// AI PROXY ENDPOINTS
+// ============================================
+
+// Generic Groq completion endpoint
+app.post('/api/ai/completion', async (req, res) => {
+    try {
+        if (!GROQ_API_KEY) {
+            return res.status(500).json({ error: 'AI service not configured' });
+        }
+
+        const { messages, jsonMode = false, maxTokens = 4096, temperature = 0.7 } = req.body;
+
+        if (!messages || !Array.isArray(messages)) {
+            return res.status(400).json({ error: 'Messages array required' });
+        }
+
+        const response = await fetch(GROQ_URL, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${GROQ_API_KEY}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                model: GROQ_MODEL,
+                messages,
+                temperature,
+                max_tokens: maxTokens,
+                ...(jsonMode && { response_format: { type: "json_object" } })
+            })
+        });
+
+        const data = await response.json();
+
+        if (data.error) {
+            console.error('Groq API error:', data.error);
+            return res.status(500).json({ error: data.error.message || 'AI request failed' });
+        }
+
+        const content = data.choices?.[0]?.message?.content || '';
+        res.json({ content });
+
+    } catch (error) {
+        console.error('AI completion error:', error);
+        res.status(500).json({ error: 'AI service unavailable' });
+    }
+});
+
+// Convenience endpoint for task generation
+app.post('/api/ai/generate-tasks', async (req, res) => {
+    try {
+        if (!GROQ_API_KEY) {
+            return res.status(500).json({ error: 'AI service not configured' });
+        }
+
+        const { goal, day, userProfile = '', checkIn = '' } = req.body;
+
+        if (!goal || !day) {
+            return res.status(400).json({ error: 'Goal and day required' });
+        }
+
+        const systemPrompt = `You are an expert task coach creating highly actionable daily tasks. 
+
+RULES FOR GOOD TASKS:
+1. Title: Clear, specific action (e.g., "Create Emergency Fund Spreadsheet" not "Check finances")
+2. Description: MUST include:
+   - Exact steps to complete the task
+   - Specific tools, apps, websites, or resources to use
+   - What "done" looks like (success criteria)
+   - Pro tips if relevant
+
+Be specific. Be actionable. Include real tools and steps.`;
+
+        const userPrompt = `Create 3 highly detailed tasks for Day ${day} of: "${goal.title}" (${goal.category}).
+${checkIn ? `\nUser's update: "${checkIn}"` : ''}
+${userProfile ? `\nAbout user: ${userProfile}` : ''}
+
+Requirements:
+- Task 1: Quick win (15-20 min, EASY) - Something they can start immediately
+- Task 2: Core work (30-45 min, MEDIUM) - Main progress task for the day  
+- Task 3: Deep work (45-60 min, HARD) - Challenging task that moves the needle
+
+Each description must have specific steps and tools/resources.
+
+Return ONLY valid JSON:
+{"tasks": [
+  {"title": "Quick Win Task", "description": "Detailed steps...", "estimatedTimeMinutes": 15, "difficulty": "EASY"},
+  {"title": "Core Work Task", "description": "Detailed steps...", "estimatedTimeMinutes": 35, "difficulty": "MEDIUM"},
+  {"title": "Deep Work Task", "description": "Detailed steps...", "estimatedTimeMinutes": 50, "difficulty": "HARD"}
+]}`;
+
+        const response = await fetch(GROQ_URL, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${GROQ_API_KEY}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                model: GROQ_MODEL,
+                messages: [
+                    { role: 'system', content: systemPrompt },
+                    { role: 'user', content: userPrompt }
+                ],
+                temperature: 0.7,
+                max_tokens: 4096,
+                response_format: { type: "json_object" }
+            })
+        });
+
+        const data = await response.json();
+
+        if (data.error) {
+            console.error('Groq task generation error:', data.error);
+            return res.status(500).json({ error: 'Task generation failed' });
+        }
+
+        const content = data.choices?.[0]?.message?.content || '';
+        
+        try {
+            const parsed = JSON.parse(content);
+            const tasks = parsed.tasks || parsed;
+            res.json({ tasks: Array.isArray(tasks) ? tasks : [] });
+        } catch {
+            res.status(500).json({ error: 'Failed to parse AI response' });
+        }
+
+    } catch (error) {
+        console.error('Task generation error:', error);
+        res.status(500).json({ error: 'Task generation unavailable' });
+    }
+});
+
+// Chat endpoint
+app.post('/api/ai/chat', async (req, res) => {
+    try {
+        if (!GROQ_API_KEY) {
+            return res.status(500).json({ error: 'AI service not configured' });
+        }
+
+        const { goal, history = [], message, userProfile = '', currentTasks = [] } = req.body;
+
+        if (!message) {
+            return res.status(400).json({ error: 'Message required' });
+        }
+
+        const taskList = currentTasks.map(t => `- ${t.title} (${t.status})`).join('\n');
+
+        const systemPrompt = `You are "The Guide" - a supportive AI coach helping someone achieve "${goal?.title || 'their goal'}".
+
+Your personality:
+- Warm, encouraging, but practical
+- Give specific actionable advice, not generic motivation
+- Keep responses concise (2-4 sentences unless they ask for detail)
+- Reference their specific tasks and goal when relevant
+- Ask follow-up questions to understand their challenges
+
+User's current tasks:
+${taskList || 'No tasks yet'}
+
+${userProfile ? `About them: ${userProfile}` : ''}`;
+
+        const messages = [
+            { role: 'system', content: systemPrompt },
+            ...history.slice(-8).map(msg => ({
+                role: msg.role === 'user' ? 'user' : 'assistant',
+                content: msg.text
+            })),
+            { role: 'user', content: message }
+        ];
+
+        const response = await fetch(GROQ_URL, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${GROQ_API_KEY}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                model: GROQ_MODEL,
+                messages,
+                temperature: 0.7,
+                max_tokens: 1024
+            })
+        });
+
+        const data = await response.json();
+
+        if (data.error) {
+            return res.status(500).json({ error: 'Chat failed' });
+        }
+
+        const content = data.choices?.[0]?.message?.content || "I'm here to help. What would you like to work on?";
+        res.json({ response: content });
+
+    } catch (error) {
+        console.error('Chat error:', error);
+        res.status(500).json({ error: 'Chat unavailable' });
+    }
+});
+
+// Curriculum generation endpoint
+app.post('/api/ai/curriculum', async (req, res) => {
+    try {
+        if (!GROQ_API_KEY) {
+            return res.status(500).json({ error: 'AI service not configured' });
+        }
+
+        const { goal } = req.body;
+
+        if (!goal) {
+            return res.status(400).json({ error: 'Goal required' });
+        }
+
+        const prompt = `Create a 4-phase learning curriculum for: "${goal.title}"
+
+Each phase should have exactly 3 lessons. Make lessons specific and practical.
+
+Return ONLY this JSON:
+{"chapters": [
+  {
+    "id": "ch-1",
+    "title": "Phase 1: Foundation",
+    "lessons": [
+      {"id": "l1", "title": "Specific Lesson Title", "duration": "10 min", "isLocked": false, "description": "What you'll learn"},
+      {"id": "l2", "title": "Specific Lesson Title", "duration": "12 min", "isLocked": false, "description": "What you'll learn"},
+      {"id": "l3", "title": "Specific Lesson Title", "duration": "10 min", "isLocked": false, "description": "What you'll learn"}
+    ],
+    "quiz": []
+  },
+  {
+    "id": "ch-2", 
+    "title": "Phase 2: Building Skills",
+    "lessons": [
+      {"id": "l4", "title": "Lesson Title", "duration": "15 min", "isLocked": false, "description": "Description"},
+      {"id": "l5", "title": "Lesson Title", "duration": "12 min", "isLocked": false, "description": "Description"},
+      {"id": "l6", "title": "Lesson Title", "duration": "10 min", "isLocked": false, "description": "Description"}
+    ],
+    "quiz": []
+  },
+  {
+    "id": "ch-3",
+    "title": "Phase 3: Advanced Techniques",
+    "lessons": [
+      {"id": "l7", "title": "Lesson Title", "duration": "15 min", "isLocked": false, "description": "Description"},
+      {"id": "l8", "title": "Lesson Title", "duration": "12 min", "isLocked": false, "description": "Description"},
+      {"id": "l9", "title": "Lesson Title", "duration": "15 min", "isLocked": false, "description": "Description"}
+    ],
+    "quiz": []
+  },
+  {
+    "id": "ch-4",
+    "title": "Phase 4: Mastery & Beyond",
+    "lessons": [
+      {"id": "l10", "title": "Lesson Title", "duration": "10 min", "isLocked": false, "description": "Description"},
+      {"id": "l11", "title": "Lesson Title", "duration": "12 min", "isLocked": false, "description": "Description"},
+      {"id": "l12", "title": "Lesson Title", "duration": "10 min", "isLocked": false, "description": "Description"}
+    ],
+    "quiz": []
+  }
+]}`;
+
+        const response = await fetch(GROQ_URL, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${GROQ_API_KEY}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                model: GROQ_MODEL,
+                messages: [
+                    { role: 'system', content: 'You are an expert curriculum designer. Create structured learning paths with practical lessons.' },
+                    { role: 'user', content: prompt }
+                ],
+                temperature: 0.7,
+                max_tokens: 4096,
+                response_format: { type: "json_object" }
+            })
+        });
+
+        const data = await response.json();
+
+        if (data.error) {
+            return res.status(500).json({ error: 'Curriculum generation failed' });
+        }
+
+        const content = data.choices?.[0]?.message?.content || '';
+        
+        try {
+            const parsed = JSON.parse(content);
+            const chapters = parsed.chapters || parsed;
+            res.json({ chapters: Array.isArray(chapters) ? chapters : [] });
+        } catch {
+            res.json({ chapters: [] });
+        }
+
+    } catch (error) {
+        console.error('Curriculum error:', error);
+        res.status(500).json({ error: 'Curriculum generation unavailable' });
+    }
+});
 
 // Temporary storage for pending verifications
 const pendingUsers = new Map();
@@ -406,3 +709,4 @@ setInterval(() => {
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
 });
+
