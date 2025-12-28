@@ -108,6 +108,7 @@ const UserSchema = new mongoose.Schema({
     emailVerificationExpires: Number,
     passwordResetCode: String,
     passwordResetExpires: Number,
+    passwordResetLastSent: Number,
     
     // Profile
     name: { type: String, default: 'Architect' },
@@ -150,3 +151,4 @@ const UserSchema = new mongoose.Schema({
 });
 
 export const User = mongoose.model('User', UserSchema);
+
