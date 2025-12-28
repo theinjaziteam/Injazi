@@ -14,8 +14,8 @@ const app = express();
 const JWT_SECRET = process.env.JWT_SECRET || 'injazi-secret-change-me';
 const PORT = process.env.PORT || 5000;
 const MONGODB_URI = process.env.MONGODB_URI;
-const RESEND_API_KEY = process.env.RESEND_API_KEY; // Email service
-const FROM_EMAIL = process.env.FROM_EMAIL || 'noreply@injazi.app';
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const FROM_EMAIL = process.env.FROM_EMAIL || 'InJazi <noreply@injazi.app>';
 
 // AdGem Config
 const ADGEM_APP_ID = process.env.ADGEM_APP_ID;
@@ -100,8 +100,10 @@ const getVerificationEmailHtml = (code, name) => `
 <!DOCTYPE html>
 <html>
 <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        body { font-family: 'Inter', Arial, sans-serif; background: #f5f5f5; margin: 0; padding: 20px; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; margin: 0; padding: 20px; }
         .container { max-width: 500px; margin: 0 auto; background: white; border-radius: 24px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
         .header { background: #171738; padding: 40px 30px; text-align: center; }
         .header h1 { color: white; margin: 0; font-size: 32px; font-weight: 900; letter-spacing: -1px; }
@@ -137,8 +139,10 @@ const getPasswordResetEmailHtml = (code, name) => `
 <!DOCTYPE html>
 <html>
 <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        body { font-family: 'Inter', Arial, sans-serif; background: #f5f5f5; margin: 0; padding: 20px; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; margin: 0; padding: 20px; }
         .container { max-width: 500px; margin: 0 auto; background: white; border-radius: 24px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
         .header { background: #171738; padding: 40px 30px; text-align: center; }
         .header h1 { color: white; margin: 0; font-size: 32px; font-weight: 900; letter-spacing: -1px; }
@@ -179,16 +183,20 @@ app.get('/', (req, res) => {
         message: 'InJazi API Running',
         timestamp: new Date().toISOString(),
         database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-        emailConfigured: !!RESEND_API_KEY
+        emailConfigured: !!RESEND_API_KEY,
+        adgemConfigured: !!ADGEM_APP_ID
     });
 });
 
 app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', db: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected' });
+    res.json({ 
+        status: 'ok', 
+        db: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected' 
+    });
 });
 
 // ============================================
-// AUTH ENDPOINT - UPDATED WITH VERIFICATION
+// AUTH ENDPOINT - WITH EMAIL VERIFICATION
 // ============================================
 app.post('/api/auth', async (req, res) => {
     try {
@@ -228,6 +236,7 @@ app.post('/api/auth', async (req, res) => {
             const userObj = user.toObject();
             delete userObj.password;
             delete userObj.emailVerificationCode;
+            delete userObj.passwordResetCode;
 
             return res.json({ 
                 user: userObj, 
@@ -405,7 +414,7 @@ app.post('/api/auth/reset-password', async (req, res) => {
 });
 
 // ============================================
-// SYNC ENDPOINT (existing)
+// SYNC ENDPOINT
 // ============================================
 app.post('/api/sync', async (req, res) => {
     try {
@@ -439,7 +448,7 @@ app.post('/api/sync', async (req, res) => {
 });
 
 // ============================================
-// USER ENDPOINT (existing)
+// USER ENDPOINT
 // ============================================
 app.get('/api/user/:email', async (req, res) => {
     try {
@@ -457,7 +466,216 @@ app.get('/api/user/:email', async (req, res) => {
     }
 });
 
-// ... rest of your existing endpoints (AdGem, etc.) ...
+// ============================================
+// ADGEM OFFERS API - Fetch offers from AdGem
+// ============================================
+app.get('/api/adgem/offers', async (req, res) => {
+    try {
+        const { email } = req.query;
+        
+        if (!email) {
+            return res.status(400).json({ error: 'Email required' });
+        }
+
+        if (!ADGEM_APP_ID) {
+            console.log('⚠️ AdGem not configured');
+            return res.json({ status: 'success', offers: [], message: 'AdGem not configured' });
+        }
+
+        // Get user's IP and user agent for AdGem API
+        const userIp = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress || '0.0.0.0';
+        const userAgent = req.headers['user-agent'] || '';
+        
+        // Detect platform
+        let platform = 'web';
+        if (/android/i.test(userAgent)) platform = 'android';
+        else if (/iphone|ipad|ipod/i.test(userAgent)) platform = 'ios';
+
+        // Build AdGem API URL
+        const adgemUrl = new URL('https://api.adgem.com/v1/wall/json');
+        adgemUrl.searchParams.append('appid', ADGEM_APP_ID);
+        adgemUrl.searchParams.append('playerid', email);
+        adgemUrl.searchParams.append('ip', userIp);
+        adgemUrl.searchParams.append('useragent', userAgent);
+        adgemUrl.searchParams.append('platform', platform);
+        adgemUrl.searchParams.append('limit', '15');
+
+        console.log('📡 Fetching AdGem offers for:', email);
+
+        const response = await fetch(adgemUrl.toString());
+        const data = await response.json();
+
+        if (data.status !== 'success' || !data.data?.[0]?.data) {
+            console.log('⚠️ AdGem API returned no offers');
+            return res.json({ status: 'success', offers: [] });
+        }
+
+        // Transform AdGem offers to our format
+        const offers = data.data[0].data.map(offer => ({
+            id: `adgem-${offer.store_id || offer.name?.replace(/\s+/g, '-').toLowerCase() || Date.now()}`,
+            storeId: offer.store_id,
+            trackingType: offer.tracking_type,
+            epc: offer.epc,
+            icon: offer.icon,
+            name: offer.name,
+            clickUrl: offer.url,
+            instructions: offer.instructions,
+            description: offer.description,
+            shortDescription: offer.short_description,
+            category1: offer.category_1,
+            category2: offer.category_2,
+            amount: offer.amount,
+            completionDifficulty: offer.completion_difficulty,
+            renderSticker: offer.render_sticker,
+            stickerText: offer.offer_sticker_text_1,
+            stickerColor: offer.offer_sticker_color_1,
+            os: offer.OS
+        }));
+
+        // Get user's completed transactions to filter out completed offers
+        const user = await User.findOne({ email });
+        const completedOfferIds = (user?.adgemTransactions || []).map(t => t.offerId);
+        
+        // Filter out already completed offers
+        const availableOffers = offers.filter(o => !completedOfferIds.includes(o.storeId));
+
+        // Cache offers in user document
+        await User.findOneAndUpdate(
+            { email },
+            { 
+                adgemOffers: availableOffers,
+                adgemLastSync: Date.now()
+            }
+        );
+
+        console.log(`✅ Fetched ${availableOffers.length} offers for ${email}`);
+
+        res.json({ 
+            status: 'success', 
+            offers: availableOffers,
+            wall: data.data[0].wall
+        });
+
+    } catch (error) {
+        console.error('❌ AdGem offers error:', error);
+        res.status(500).json({ status: 'error', offers: [], message: error.message });
+    }
+});
+
+// ============================================
+// ADGEM POSTBACK - Receives conversion notifications
+// ============================================
+app.get('/api/adgem/postback', async (req, res) => {
+    try {
+        console.log('📥 AdGem Postback Received:', req.query);
+
+        const {
+            player_id,
+            amount,
+            payout,
+            transaction_id,
+            campaign_id,
+            offer_id,
+            offer_name,
+            goal_id,
+            goal_name,
+            store_id
+        } = req.query;
+
+        // Validate required fields
+        if (!player_id || !transaction_id) {
+            console.error('❌ Missing required fields');
+            return res.status(400).send('Missing required fields');
+        }
+
+        // Find user
+        const user = await User.findOne({ email: player_id });
+        
+        if (!user) {
+            console.error('❌ User not found:', player_id);
+            return res.status(404).send('User not found');
+        }
+
+        // Check for duplicate transaction
+        const existingTransaction = user.adgemTransactions?.find(
+            t => t.transactionId === transaction_id
+        );
+        
+        if (existingTransaction) {
+            console.log('⚠️ Duplicate transaction:', transaction_id);
+            return res.status(200).send('OK');
+        }
+
+        const creditsToAdd = parseInt(amount) || 0;
+        const payoutAmount = parseFloat(payout) || 0;
+
+        // Credit user and record transaction
+        await User.findOneAndUpdate(
+            { email: player_id },
+            {
+                $inc: { credits: creditsToAdd },
+                $push: {
+                    adgemTransactions: {
+                        transactionId: transaction_id,
+                        visibleId: transaction_id.substring(0, 8),
+                        campaignId: campaign_id,
+                        offerId: store_id || offer_id,
+                        offerName: offer_name || 'Offer',
+                        credits: creditsToAdd,
+                        payout: payoutAmount,
+                        goalId: goal_id,
+                        goalName: goal_name,
+                        completedAt: Date.now()
+                    }
+                },
+                $pull: {
+                    adgemOffers: { storeId: store_id }
+                }
+            }
+        );
+
+        console.log(`✅ Credited ${creditsToAdd} credits to ${player_id} for: ${offer_name}`);
+        
+        res.status(200).send('OK');
+
+    } catch (error) {
+        console.error('❌ AdGem Postback Error:', error);
+        res.status(500).send('Server error');
+    }
+});
+
+// ============================================
+// DEBUG ENDPOINT
+// ============================================
+app.get('/api/debug/:email', async (req, res) => {
+    try {
+        const user = await User.findOne({ email: req.params.email });
+        if (!user) return res.status(404).json({ message: 'User not found' });
+        
+        res.json({
+            email: user.email,
+            name: user.name,
+            isEmailVerified: user.isEmailVerified,
+            credits: user.credits,
+            currentDay: user.currentDay,
+            hasGoal: !!user.goal,
+            adgemOffersCount: user.adgemOffers?.length || 0,
+            adgemTransactionsCount: user.adgemTransactions?.length || 0,
+            adgemLastSync: user.adgemLastSync,
+            recentTransactions: (user.adgemTransactions || []).slice(-5)
+        });
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
+
+// ============================================
+// ERROR HANDLER
+// ============================================
+app.use((err, req, res, next) => {
+    console.error('Server Error:', err.stack);
+    res.status(500).json({ message: err.message });
+});
 
 // ============================================
 // START SERVER
@@ -465,5 +683,7 @@ app.get('/api/user/:email', async (req, res) => {
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`🌐 Allowed origins:`, allowedOrigins);
     console.log(`📧 Email service: ${RESEND_API_KEY ? 'Configured' : 'Not configured'}`);
+    console.log(`🎮 AdGem: ${ADGEM_APP_ID ? 'Configured' : 'Not configured'}`);
 });
