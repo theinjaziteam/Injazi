@@ -207,19 +207,42 @@ app.get('/api/health', (req, res) => {
     });
 });
 
+// Email validation
+const isValidEmail = (email) => {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return emailRegex.test(email);
+};
+
 // ============================================
-// AUTH ENDPOINT - REGISTER STORES IN TEMP, LOGIN CHECKS DB
+// AUTH ENDPOINT
 // ============================================
 app.post('/api/auth', async (req, res) => {
     try {
         const { email, password, name, country, isRegister } = req.body;
+        
+        // Basic validation
+        if (!email || !password) {
+            return res.status(400).json({ message: 'Email and password are required.' });
+        }
+
         const normalizedEmail = email.toLowerCase().trim();
 
+        // Validate email format
+        if (!isValidEmail(normalizedEmail)) {
+            return res.status(400).json({ message: 'Please enter a valid email address.' });
+        }
+
+        // Validate password length
+        if (password.length < 6) {
+            return res.status(400).json({ message: 'Password must be at least 6 characters.' });
+        }
+
         if (isRegister) {
-            // ============================================
-            // REGISTRATION - Store in temporary memory
-            // ============================================
-            
+            // Validate name for registration
+            if (!name || name.trim().length < 2) {
+                return res.status(400).json({ message: 'Please enter your name.' });
+            }
+
             // Check if user already exists in DB
             const existingUser = await User.findOne({ email: normalizedEmail });
             if (existingUser) {
@@ -229,7 +252,6 @@ app.post('/api/auth', async (req, res) => {
             // Check if already pending verification
             const existingPending = pendingUsers.get(normalizedEmail);
             if (existingPending && existingPending.expiresAt > Date.now()) {
-                // Already pending - check cooldown for resend
                 const timeSinceLastSent = Date.now() - existingPending.lastSentAt;
                 const timeRemaining = Math.ceil((RESEND_COOLDOWN - timeSinceLastSent) / 1000);
                 
@@ -251,7 +273,7 @@ app.post('/api/auth', async (req, res) => {
                 userData: {
                     email: normalizedEmail,
                     password: hashedPassword,
-                    name: name || 'Architect',
+                    name: name.trim(),
                     country: country || 'Unknown',
                     createdAt: Date.now()
                 },
@@ -263,11 +285,17 @@ app.post('/api/auth', async (req, res) => {
             console.log(`📝 Pending registration for ${normalizedEmail}, code: ${verificationCode}`);
 
             // Send verification email
-            await sendEmail(
+            const emailResult = await sendEmail(
                 normalizedEmail,
                 'Verify your InJazi account',
-                getVerificationEmailHtml(verificationCode, name)
+                getVerificationEmailHtml(verificationCode, name.trim())
             );
+
+            if (!emailResult.success && !emailResult.mock) {
+                // Email failed to send - remove from pending
+                pendingUsers.delete(normalizedEmail);
+                return res.status(500).json({ message: 'Failed to send verification email. Please try again.' });
+            }
 
             return res.json({ 
                 success: true,
@@ -276,11 +304,7 @@ app.post('/api/auth', async (req, res) => {
             });
 
         } else {
-            // ============================================
-            // LOGIN - Only check database (verified users)
-            // ============================================
-            
-            // Check if user is pending verification
+            // LOGIN
             const pendingUser = pendingUsers.get(normalizedEmail);
             if (pendingUser && pendingUser.expiresAt > Date.now()) {
                 return res.status(400).json({ 
@@ -311,7 +335,7 @@ app.post('/api/auth', async (req, res) => {
         }
     } catch (error) {
         console.error('Auth error:', error);
-        res.status(500).json({ message: error.message });
+        res.status(500).json({ message: 'Server error. Please try again.' });
     }
 });
 
