@@ -212,3 +212,107 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`📡 Allowed Origins: ${allowedOrigins.join(', ')}`);
 });
 
+// ============================================
+// ADGEM POSTBACK ENDPOINT
+// ============================================
+
+// AdGem Postback Handler - receives conversion notifications
+app.get('/api/adgem/postback', async (req, res) => {
+    try {
+        console.log('📥 AdGem Postback Received:', req.query);
+
+        // Extract parameters from AdGem
+        const {
+            player_id,      // User's email (we pass this as player_id)
+            amount,         // Virtual currency amount to reward
+            payout,         // Actual USD earned
+            transaction_id, // Unique transaction ID from AdGem
+            campaign_id,    // Offer/campaign ID
+            offer_name,     // Name of the completed offer
+            verifier,       // Security hash (optional but recommended)
+            request_id      // Unique request ID
+        } = req.query;
+
+        // Validate required fields
+        if (!player_id || !amount || !transaction_id) {
+            console.error('❌ Missing required fields');
+            return res.status(400).send('Missing required fields');
+        }
+
+        // Optional: Verify the postback hash (recommended for production)
+        // You would need to store ADGEM_POSTBACK_KEY in your env variables
+        if (process.env.ADGEM_POSTBACK_KEY && verifier) {
+            const crypto = require('crypto');
+            
+            // Rebuild URL without verifier
+            const url = new URL(`${req.protocol}://${req.get('host')}${req.originalUrl}`);
+            url.searchParams.delete('verifier');
+            
+            const expectedHash = crypto
+                .createHmac('sha256', process.env.ADGEM_POSTBACK_KEY)
+                .update(url.toString())
+                .digest('hex');
+            
+            if (expectedHash !== verifier) {
+                console.error('❌ Invalid verifier hash');
+                return res.status(403).send('Invalid verifier');
+            }
+        }
+
+        // Find the user by email (player_id)
+        const user = await User.findOne({ email: player_id });
+        
+        if (!user) {
+            console.error('❌ User not found:', player_id);
+            return res.status(404).send('User not found');
+        }
+
+        // Check for duplicate transaction (prevent double crediting)
+        const existingTransaction = user.adgemTransactions?.find(
+            t => t.transactionId === transaction_id
+        );
+        
+        if (existingTransaction) {
+            console.log('⚠️ Duplicate transaction, already processed:', transaction_id);
+            return res.status(200).send('OK'); // Return OK to stop AdGem retries
+        }
+
+        // Credit the user
+        const creditsToAdd = parseInt(amount) || 0;
+        const payoutAmount = parseFloat(payout) || 0;
+
+        await User.findOneAndUpdate(
+            { email: player_id },
+            {
+                $inc: { credits: creditsToAdd },
+                $push: {
+                    adgemTransactions: {
+                        transactionId: transaction_id,
+                        campaignId: campaign_id,
+                        offerName: offer_name,
+                        credits: creditsToAdd,
+                        payout: payoutAmount,
+                        completedAt: Date.now()
+                    }
+                }
+            }
+        );
+
+        console.log(`✅ Credited ${creditsToAdd} credits to ${player_id} for offer: ${offer_name}`);
+        
+        // AdGem expects "OK" or "1" as success response
+        res.status(200).send('OK');
+
+    } catch (error) {
+        console.error('❌ AdGem Postback Error:', error);
+        res.status(500).send('Server error');
+    }
+});
+
+// Health check for AdGem endpoint
+app.get('/api/adgem/health', (req, res) => {
+    res.status(200).json({ status: 'ok', service: 'adgem-postback' });
+});
+
+
+
