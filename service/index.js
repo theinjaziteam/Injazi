@@ -5,9 +5,6 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
 import { User } from './models.js';
-const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const GROQ_MODEL = 'llama-3.3-70b-versatile';
 
 dotenv.config();
 
@@ -16,315 +13,83 @@ const app = express();
 const JWT_SECRET = process.env.JWT_SECRET || 'injazi-secret-change-me';
 const PORT = process.env.PORT || 5000;
 const MONGODB_URI = process.env.MONGODB_URI;
-const ADGEM_APP_ID = process.env.ADGEM_APP_ID;
-const ADGEM_POSTBACK_KEY = process.env.ADGEM_POSTBACK_KEY;
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const GROQ_MODEL = 'llama-3.3-70b-versatile';
 
 // ============================================
-// AI PROXY ENDPOINTS
+// RATE LIMITING
 // ============================================
 
-// Generic Groq completion endpoint
-app.post('/api/ai/completion', async (req, res) => {
-    try {
-        if (!GROQ_API_KEY) {
-            return res.status(500).json({ error: 'AI service not configured' });
-        }
+const rateLimits = new Map();
 
-        const { messages, jsonMode = false, maxTokens = 4096, temperature = 0.7 } = req.body;
+const RATE_LIMITS = {
+    'ai/completion': { windowMs: 60 * 1000, maxRequests: 20 },
+    'ai/generate-tasks': { windowMs: 60 * 1000, maxRequests: 10 },
+    'ai/chat': { windowMs: 60 * 1000, maxRequests: 30 },
+    'ai/curriculum': { windowMs: 60 * 1000, maxRequests: 5 },
+    'default': { windowMs: 60 * 1000, maxRequests: 60 }
+};
 
-        if (!messages || !Array.isArray(messages)) {
-            return res.status(400).json({ error: 'Messages array required' });
-        }
-
-        const response = await fetch(GROQ_URL, {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${GROQ_API_KEY}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                model: GROQ_MODEL,
-                messages,
-                temperature,
-                max_tokens: maxTokens,
-                ...(jsonMode && { response_format: { type: "json_object" } })
-            })
-        });
-
-        const data = await response.json();
-
-        if (data.error) {
-            console.error('Groq API error:', data.error);
-            return res.status(500).json({ error: data.error.message || 'AI request failed' });
-        }
-
-        const content = data.choices?.[0]?.message?.content || '';
-        res.json({ content });
-
-    } catch (error) {
-        console.error('AI completion error:', error);
-        res.status(500).json({ error: 'AI service unavailable' });
-    }
-});
-
-// Convenience endpoint for task generation
-app.post('/api/ai/generate-tasks', async (req, res) => {
-    try {
-        if (!GROQ_API_KEY) {
-            return res.status(500).json({ error: 'AI service not configured' });
-        }
-
-        const { goal, day, userProfile = '', checkIn = '' } = req.body;
-
-        if (!goal || !day) {
-            return res.status(400).json({ error: 'Goal and day required' });
-        }
-
-        const systemPrompt = `You are an expert task coach creating highly actionable daily tasks. 
-
-RULES FOR GOOD TASKS:
-1. Title: Clear, specific action (e.g., "Create Emergency Fund Spreadsheet" not "Check finances")
-2. Description: MUST include:
-   - Exact steps to complete the task
-   - Specific tools, apps, websites, or resources to use
-   - What "done" looks like (success criteria)
-   - Pro tips if relevant
-
-Be specific. Be actionable. Include real tools and steps.`;
-
-        const userPrompt = `Create 3 highly detailed tasks for Day ${day} of: "${goal.title}" (${goal.category}).
-${checkIn ? `\nUser's update: "${checkIn}"` : ''}
-${userProfile ? `\nAbout user: ${userProfile}` : ''}
-
-Requirements:
-- Task 1: Quick win (15-20 min, EASY) - Something they can start immediately
-- Task 2: Core work (30-45 min, MEDIUM) - Main progress task for the day  
-- Task 3: Deep work (45-60 min, HARD) - Challenging task that moves the needle
-
-Each description must have specific steps and tools/resources.
-
-Return ONLY valid JSON:
-{"tasks": [
-  {"title": "Quick Win Task", "description": "Detailed steps...", "estimatedTimeMinutes": 15, "difficulty": "EASY"},
-  {"title": "Core Work Task", "description": "Detailed steps...", "estimatedTimeMinutes": 35, "difficulty": "MEDIUM"},
-  {"title": "Deep Work Task", "description": "Detailed steps...", "estimatedTimeMinutes": 50, "difficulty": "HARD"}
-]}`;
-
-        const response = await fetch(GROQ_URL, {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${GROQ_API_KEY}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                model: GROQ_MODEL,
-                messages: [
-                    { role: 'system', content: systemPrompt },
-                    { role: 'user', content: userPrompt }
-                ],
-                temperature: 0.7,
-                max_tokens: 4096,
-                response_format: { type: "json_object" }
-            })
-        });
-
-        const data = await response.json();
-
-        if (data.error) {
-            console.error('Groq task generation error:', data.error);
-            return res.status(500).json({ error: 'Task generation failed' });
-        }
-
-        const content = data.choices?.[0]?.message?.content || '';
+const rateLimiter = (endpoint) => {
+    return (req, res, next) => {
+        const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.ip || 'unknown';
+        const email = req.body?.email || 'anon';
+        const identifier = `${ip}:${email}:${endpoint}`;
         
-        try {
-            const parsed = JSON.parse(content);
-            const tasks = parsed.tasks || parsed;
-            res.json({ tasks: Array.isArray(tasks) ? tasks : [] });
-        } catch {
-            res.status(500).json({ error: 'Failed to parse AI response' });
-        }
-
-    } catch (error) {
-        console.error('Task generation error:', error);
-        res.status(500).json({ error: 'Task generation unavailable' });
-    }
-});
-
-// Chat endpoint
-app.post('/api/ai/chat', async (req, res) => {
-    try {
-        if (!GROQ_API_KEY) {
-            return res.status(500).json({ error: 'AI service not configured' });
-        }
-
-        const { goal, history = [], message, userProfile = '', currentTasks = [] } = req.body;
-
-        if (!message) {
-            return res.status(400).json({ error: 'Message required' });
-        }
-
-        const taskList = currentTasks.map(t => `- ${t.title} (${t.status})`).join('\n');
-
-        const systemPrompt = `You are "The Guide" - a supportive AI coach helping someone achieve "${goal?.title || 'their goal'}".
-
-Your personality:
-- Warm, encouraging, but practical
-- Give specific actionable advice, not generic motivation
-- Keep responses concise (2-4 sentences unless they ask for detail)
-- Reference their specific tasks and goal when relevant
-- Ask follow-up questions to understand their challenges
-
-User's current tasks:
-${taskList || 'No tasks yet'}
-
-${userProfile ? `About them: ${userProfile}` : ''}`;
-
-        const messages = [
-            { role: 'system', content: systemPrompt },
-            ...history.slice(-8).map(msg => ({
-                role: msg.role === 'user' ? 'user' : 'assistant',
-                content: msg.text
-            })),
-            { role: 'user', content: message }
-        ];
-
-        const response = await fetch(GROQ_URL, {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${GROQ_API_KEY}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                model: GROQ_MODEL,
-                messages,
-                temperature: 0.7,
-                max_tokens: 1024
-            })
-        });
-
-        const data = await response.json();
-
-        if (data.error) {
-            return res.status(500).json({ error: 'Chat failed' });
-        }
-
-        const content = data.choices?.[0]?.message?.content || "I'm here to help. What would you like to work on?";
-        res.json({ response: content });
-
-    } catch (error) {
-        console.error('Chat error:', error);
-        res.status(500).json({ error: 'Chat unavailable' });
-    }
-});
-
-// Curriculum generation endpoint
-app.post('/api/ai/curriculum', async (req, res) => {
-    try {
-        if (!GROQ_API_KEY) {
-            return res.status(500).json({ error: 'AI service not configured' });
-        }
-
-        const { goal } = req.body;
-
-        if (!goal) {
-            return res.status(400).json({ error: 'Goal required' });
-        }
-
-        const prompt = `Create a 4-phase learning curriculum for: "${goal.title}"
-
-Each phase should have exactly 3 lessons. Make lessons specific and practical.
-
-Return ONLY this JSON:
-{"chapters": [
-  {
-    "id": "ch-1",
-    "title": "Phase 1: Foundation",
-    "lessons": [
-      {"id": "l1", "title": "Specific Lesson Title", "duration": "10 min", "isLocked": false, "description": "What you'll learn"},
-      {"id": "l2", "title": "Specific Lesson Title", "duration": "12 min", "isLocked": false, "description": "What you'll learn"},
-      {"id": "l3", "title": "Specific Lesson Title", "duration": "10 min", "isLocked": false, "description": "What you'll learn"}
-    ],
-    "quiz": []
-  },
-  {
-    "id": "ch-2", 
-    "title": "Phase 2: Building Skills",
-    "lessons": [
-      {"id": "l4", "title": "Lesson Title", "duration": "15 min", "isLocked": false, "description": "Description"},
-      {"id": "l5", "title": "Lesson Title", "duration": "12 min", "isLocked": false, "description": "Description"},
-      {"id": "l6", "title": "Lesson Title", "duration": "10 min", "isLocked": false, "description": "Description"}
-    ],
-    "quiz": []
-  },
-  {
-    "id": "ch-3",
-    "title": "Phase 3: Advanced Techniques",
-    "lessons": [
-      {"id": "l7", "title": "Lesson Title", "duration": "15 min", "isLocked": false, "description": "Description"},
-      {"id": "l8", "title": "Lesson Title", "duration": "12 min", "isLocked": false, "description": "Description"},
-      {"id": "l9", "title": "Lesson Title", "duration": "15 min", "isLocked": false, "description": "Description"}
-    ],
-    "quiz": []
-  },
-  {
-    "id": "ch-4",
-    "title": "Phase 4: Mastery & Beyond",
-    "lessons": [
-      {"id": "l10", "title": "Lesson Title", "duration": "10 min", "isLocked": false, "description": "Description"},
-      {"id": "l11", "title": "Lesson Title", "duration": "12 min", "isLocked": false, "description": "Description"},
-      {"id": "l12", "title": "Lesson Title", "duration": "10 min", "isLocked": false, "description": "Description"}
-    ],
-    "quiz": []
-  }
-]}`;
-
-        const response = await fetch(GROQ_URL, {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${GROQ_API_KEY}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                model: GROQ_MODEL,
-                messages: [
-                    { role: 'system', content: 'You are an expert curriculum designer. Create structured learning paths with practical lessons.' },
-                    { role: 'user', content: prompt }
-                ],
-                temperature: 0.7,
-                max_tokens: 4096,
-                response_format: { type: "json_object" }
-            })
-        });
-
-        const data = await response.json();
-
-        if (data.error) {
-            return res.status(500).json({ error: 'Curriculum generation failed' });
-        }
-
-        const content = data.choices?.[0]?.message?.content || '';
+        const limits = RATE_LIMITS[endpoint] || RATE_LIMITS['default'];
+        const now = Date.now();
         
-        try {
-            const parsed = JSON.parse(content);
-            const chapters = parsed.chapters || parsed;
-            res.json({ chapters: Array.isArray(chapters) ? chapters : [] });
-        } catch {
-            res.json({ chapters: [] });
+        let entry = rateLimits.get(identifier);
+        
+        if (!entry || now - entry.windowStart > limits.windowMs) {
+            entry = { windowStart: now, count: 1 };
+            rateLimits.set(identifier, entry);
+        } else {
+            entry.count++;
         }
+        
+        if (entry.count > limits.maxRequests) {
+            const retryAfter = Math.ceil((entry.windowStart + limits.windowMs - now) / 1000);
+            console.log(`⚠️ Rate limited: ${identifier} (${entry.count}/${limits.maxRequests})`);
+            
+            return res.status(429).json({ 
+                error: 'Too many requests. Please slow down.',
+                retryAfter,
+                limit: limits.maxRequests
+            });
+        }
+        
+        res.setHeader('X-RateLimit-Limit', limits.maxRequests);
+        res.setHeader('X-RateLimit-Remaining', Math.max(0, limits.maxRequests - entry.count));
+        res.setHeader('X-RateLimit-Reset', Math.ceil((entry.windowStart + limits.windowMs) / 1000));
+        
+        next();
+    };
+};
 
-    } catch (error) {
-        console.error('Curriculum error:', error);
-        res.status(500).json({ error: 'Curriculum generation unavailable' });
+// Cleanup old entries
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of rateLimits.entries()) {
+        if (now - entry.windowStart > 5 * 60 * 1000) {
+            rateLimits.delete(key);
+        }
     }
-});
+}, 5 * 60 * 1000);
 
-// Temporary storage for pending verifications
+// ============================================
+// PENDING USERS (Email Verification)
+// ============================================
+
 const pendingUsers = new Map();
-const RESEND_COOLDOWN = 5 * 60 * 1000; // 5 minutes
-const CODE_EXPIRY = 15 * 60 * 1000; // 15 minutes
+const RESEND_COOLDOWN = 5 * 60 * 1000;
+const CODE_EXPIRY = 15 * 60 * 1000;
 
-// CORS setup
+// ============================================
+// MIDDLEWARE
+// ============================================
+
 const allowedOrigins = [
     process.env.FRONTEND_URL,
     'http://localhost:3000',
@@ -345,33 +110,49 @@ app.use(cors({
 
 app.use(express.json({ limit: '10mb' }));
 
+const optionalAuth = (req, res, next) => {
+    const authHeader = req.headers.authorization;
+    if (authHeader?.startsWith('Bearer ')) {
+        try {
+            const decoded = jwt.verify(authHeader.slice(7), JWT_SECRET);
+            req.userId = decoded.id;
+        } catch {}
+    }
+    next();
+};
+
+// ============================================
+// DATABASE
+// ============================================
+
 mongoose.connect(MONGODB_URI)
     .then(() => console.log('✅ MongoDB Connected'))
     .catch(err => console.error('❌ MongoDB Error:', err));
 
 const generateToken = (userId) => jwt.sign({ id: userId }, JWT_SECRET, { expiresIn: '30d' });
-
 const generateVerificationCode = () => Math.floor(100000 + Math.random() * 900000).toString();
-
 const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 
-// Health check
+// ============================================
+// HEALTH CHECK
+// ============================================
+
 app.get('/', (req, res) => {
-    res.json({ 
-        status: 'ok', 
-        message: 'InJazi API Running',
-        pendingRegistrations: pendingUsers.size
-    });
+    res.json({ status: 'ok', message: 'InJazi API Running' });
 });
 
 app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', db: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected' });
+    res.json({ 
+        status: 'ok', 
+        db: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+        ai: GROQ_API_KEY ? 'configured' : 'not configured'
+    });
 });
 
 // ============================================
-// REGISTER - Creates pending user & returns code
-// Email is sent from FRONTEND via EmailJS
+// AUTH ENDPOINTS
 // ============================================
+
 app.post('/api/auth/register', async (req, res) => {
     try {
         const { email, password, name, country } = req.body;
@@ -390,13 +171,11 @@ app.post('/api/auth/register', async (req, res) => {
             return res.status(400).json({ message: 'Password must be at least 6 characters.' });
         }
 
-        // Check if user exists
         const existingUser = await User.findOne({ email: normalizedEmail });
         if (existingUser) {
             return res.status(400).json({ message: 'User already exists. Please log in.' });
         }
 
-        // Check cooldown
         const existingPending = pendingUsers.get(normalizedEmail);
         if (existingPending && existingPending.expiresAt > Date.now()) {
             const timeSinceLastSent = Date.now() - existingPending.lastSentAt;
@@ -412,7 +191,6 @@ app.post('/api/auth/register', async (req, res) => {
         const hashedPassword = await bcrypt.hash(password, 10);
         const verificationCode = generateVerificationCode();
         
-        // Store pending user
         pendingUsers.set(normalizedEmail, {
             userData: {
                 email: normalizedEmail,
@@ -426,12 +204,9 @@ app.post('/api/auth/register', async (req, res) => {
             lastSentAt: Date.now()
         });
 
-        console.log(`📝 Pending: ${normalizedEmail}, code: ${verificationCode}`);
-
-        // Return code to frontend - frontend will send email via EmailJS
         return res.json({ 
             success: true,
-            code: verificationCode, // Frontend needs this to send email
+            code: verificationCode,
             name: name.trim(),
             email: normalizedEmail,
             message: 'Verification code generated'
@@ -443,9 +218,6 @@ app.post('/api/auth/register', async (req, res) => {
     }
 });
 
-// ============================================
-// LOGIN
-// ============================================
 app.post('/api/auth/login', async (req, res) => {
     try {
         const { email, password } = req.body;
@@ -456,7 +228,6 @@ app.post('/api/auth/login', async (req, res) => {
 
         const normalizedEmail = email.toLowerCase().trim();
 
-        // Check if pending verification
         const pendingUser = pendingUsers.get(normalizedEmail);
         if (pendingUser && pendingUser.expiresAt > Date.now()) {
             return res.status(400).json({ 
@@ -487,9 +258,6 @@ app.post('/api/auth/login', async (req, res) => {
     }
 });
 
-// ============================================
-// VERIFY EMAIL
-// ============================================
 app.post('/api/auth/verify', async (req, res) => {
     try {
         const { email, code } = req.body;
@@ -510,7 +278,6 @@ app.post('/api/auth/verify', async (req, res) => {
             return res.status(400).json({ message: 'Invalid verification code.' });
         }
 
-        // Create user in database
         const user = new User({
             ...pending.userData,
             isEmailVerified: true
@@ -518,8 +285,6 @@ app.post('/api/auth/verify', async (req, res) => {
 
         await user.save();
         pendingUsers.delete(normalizedEmail);
-
-        console.log('✅ User verified:', normalizedEmail);
 
         const token = generateToken(user._id);
         const userObj = user.toObject();
@@ -533,9 +298,6 @@ app.post('/api/auth/verify', async (req, res) => {
     }
 });
 
-// ============================================
-// RESEND CODE
-// ============================================
 app.post('/api/auth/resend', async (req, res) => {
     try {
         const { email } = req.body;
@@ -547,7 +309,6 @@ app.post('/api/auth/resend', async (req, res) => {
             return res.status(400).json({ message: 'No pending verification. Please register again.' });
         }
 
-        // Check cooldown
         const timeSinceLastSent = Date.now() - pending.lastSentAt;
         if (timeSinceLastSent < RESEND_COOLDOWN) {
             const timeRemaining = Math.ceil((RESEND_COOLDOWN - timeSinceLastSent) / 1000);
@@ -557,14 +318,11 @@ app.post('/api/auth/resend', async (req, res) => {
             });
         }
 
-        // Generate new code
         const newCode = generateVerificationCode();
         pending.code = newCode;
         pending.expiresAt = Date.now() + CODE_EXPIRY;
         pending.lastSentAt = Date.now();
         pendingUsers.set(normalizedEmail, pending);
-
-        console.log(`📝 Resend: ${normalizedEmail}, code: ${newCode}`);
 
         res.json({ 
             success: true, 
@@ -580,9 +338,6 @@ app.post('/api/auth/resend', async (req, res) => {
     }
 });
 
-// ============================================
-// FORGOT PASSWORD
-// ============================================
 app.post('/api/auth/forgot-password', async (req, res) => {
     try {
         const { email } = req.body;
@@ -593,7 +348,6 @@ app.post('/api/auth/forgot-password', async (req, res) => {
             return res.json({ success: true, message: 'If email exists, code was sent.' });
         }
 
-        // Check cooldown
         if (user.passwordResetLastSent && Date.now() - user.passwordResetLastSent < RESEND_COOLDOWN) {
             const timeRemaining = Math.ceil((RESEND_COOLDOWN - (Date.now() - user.passwordResetLastSent)) / 1000);
             return res.status(400).json({ 
@@ -608,8 +362,6 @@ app.post('/api/auth/forgot-password', async (req, res) => {
         user.passwordResetLastSent = Date.now();
         await user.save();
 
-        console.log(`📝 Password reset: ${normalizedEmail}, code: ${resetCode}`);
-
         res.json({ 
             success: true, 
             code: resetCode,
@@ -623,9 +375,6 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     }
 });
 
-// ============================================
-// RESET PASSWORD
-// ============================================
 app.post('/api/auth/reset-password', async (req, res) => {
     try {
         const { email, code, newPassword } = req.body;
@@ -654,8 +403,6 @@ app.post('/api/auth/reset-password', async (req, res) => {
         user.passwordResetLastSent = undefined;
         await user.save();
 
-        console.log('✅ Password reset:', normalizedEmail);
-
         res.json({ success: true, message: 'Password reset successfully.' });
 
     } catch (error) {
@@ -665,8 +412,9 @@ app.post('/api/auth/reset-password', async (req, res) => {
 });
 
 // ============================================
-// SYNC & USER ENDPOINTS (keep existing)
+// SYNC & USER ENDPOINTS
 // ============================================
+
 app.post('/api/sync', async (req, res) => {
     try {
         const userData = req.body;
@@ -696,17 +444,301 @@ app.get('/api/user/:email', async (req, res) => {
     }
 });
 
-// Cleanup expired pending users
+// ============================================
+// AI ENDPOINTS (with rate limiting)
+// ============================================
+
+app.post('/api/ai/completion', optionalAuth, rateLimiter('ai/completion'), async (req, res) => {
+    try {
+        if (!GROQ_API_KEY) {
+            return res.status(500).json({ error: 'AI service not configured' });
+        }
+
+        const { messages, jsonMode = false, maxTokens = 4096, temperature = 0.7 } = req.body;
+
+        if (!messages || !Array.isArray(messages)) {
+            return res.status(400).json({ error: 'Messages array required' });
+        }
+
+        if (messages.length > 20) {
+            return res.status(400).json({ error: 'Too many messages. Maximum 20 allowed.' });
+        }
+
+        const totalLength = messages.reduce((sum, m) => sum + (m.content?.length || 0), 0);
+        if (totalLength > 50000) {
+            return res.status(400).json({ error: 'Content too long.' });
+        }
+
+        const response = await fetch(GROQ_URL, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${GROQ_API_KEY}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                model: GROQ_MODEL,
+                messages,
+                temperature: Math.min(Math.max(temperature, 0), 1),
+                max_tokens: Math.min(maxTokens, 4096),
+                ...(jsonMode && { response_format: { type: "json_object" } })
+            })
+        });
+
+        const data = await response.json();
+
+        if (data.error) {
+            console.error('Groq API error:', data.error);
+            return res.status(500).json({ error: data.error.message || 'AI request failed' });
+        }
+
+        res.json({ content: data.choices?.[0]?.message?.content || '' });
+
+    } catch (error) {
+        console.error('AI completion error:', error);
+        res.status(500).json({ error: 'AI service unavailable' });
+    }
+});
+
+app.post('/api/ai/generate-tasks', optionalAuth, rateLimiter('ai/generate-tasks'), async (req, res) => {
+    try {
+        if (!GROQ_API_KEY) {
+            return res.status(500).json({ error: 'AI service not configured' });
+        }
+
+        const { goal, day, userProfile = '', checkIn = '' } = req.body;
+
+        if (!goal || !day) {
+            return res.status(400).json({ error: 'Goal and day required' });
+        }
+
+        if (day < 1 || day > 365) {
+            return res.status(400).json({ error: 'Invalid day number' });
+        }
+
+        const safeGoalTitle = (goal.title || 'Goal').slice(0, 200);
+        const safeGoalCategory = (goal.category || 'General').slice(0, 50);
+        const safeUserProfile = (userProfile || '').slice(0, 500);
+        const safeCheckIn = (checkIn || '').slice(0, 1000);
+
+        const systemPrompt = `You are an expert task coach creating highly actionable daily tasks. 
+
+RULES FOR GOOD TASKS:
+1. Title: Clear, specific action (e.g., "Create Emergency Fund Spreadsheet" not "Check finances")
+2. Description: MUST include exact steps, specific tools/apps/resources, and success criteria.
+
+Be specific. Be actionable. Include real tools and steps.`;
+
+        const userPrompt = `Create 3 highly detailed tasks for Day ${day} of: "${safeGoalTitle}" (${safeGoalCategory}).
+${safeCheckIn ? `\nUser's update: "${safeCheckIn}"` : ''}
+${safeUserProfile ? `\nAbout user: ${safeUserProfile}` : ''}
+
+Requirements:
+- Task 1: Quick win (15-20 min, EASY)
+- Task 2: Core work (30-45 min, MEDIUM)  
+- Task 3: Deep work (45-60 min, HARD)
+
+Return ONLY valid JSON:
+{"tasks": [
+  {"title": "Task Title", "description": "Detailed steps...", "estimatedTimeMinutes": 15, "difficulty": "EASY"},
+  {"title": "Task Title", "description": "Detailed steps...", "estimatedTimeMinutes": 35, "difficulty": "MEDIUM"},
+  {"title": "Task Title", "description": "Detailed steps...", "estimatedTimeMinutes": 50, "difficulty": "HARD"}
+]}`;
+
+        const response = await fetch(GROQ_URL, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${GROQ_API_KEY}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                model: GROQ_MODEL,
+                messages: [
+                    { role: 'system', content: systemPrompt },
+                    { role: 'user', content: userPrompt }
+                ],
+                temperature: 0.7,
+                max_tokens: 4096,
+                response_format: { type: "json_object" }
+            })
+        });
+
+        const data = await response.json();
+
+        if (data.error) {
+            console.error('Groq task error:', data.error);
+            return res.status(500).json({ error: 'Task generation failed' });
+        }
+
+        const content = data.choices?.[0]?.message?.content || '';
+        
+        try {
+            const parsed = JSON.parse(content);
+            res.json({ tasks: Array.isArray(parsed.tasks || parsed) ? (parsed.tasks || parsed) : [] });
+        } catch {
+            res.status(500).json({ error: 'Failed to parse AI response' });
+        }
+
+    } catch (error) {
+        console.error('Task generation error:', error);
+        res.status(500).json({ error: 'Task generation unavailable' });
+    }
+});
+
+app.post('/api/ai/chat', optionalAuth, rateLimiter('ai/chat'), async (req, res) => {
+    try {
+        if (!GROQ_API_KEY) {
+            return res.status(500).json({ error: 'AI service not configured' });
+        }
+
+        const { goal, history = [], message, userProfile = '', currentTasks = [] } = req.body;
+
+        if (!message) {
+            return res.status(400).json({ error: 'Message required' });
+        }
+
+        const safeMessage = message.slice(0, 2000);
+        const safeHistory = history.slice(-10);
+        const safeGoalTitle = goal?.title?.slice(0, 200) || 'their goal';
+        const taskList = currentTasks.slice(0, 10).map(t => `- ${(t.title || '').slice(0, 100)} (${t.status || 'pending'})`).join('\n');
+
+        const systemPrompt = `You are "The Guide" - a supportive AI coach helping someone achieve "${safeGoalTitle}".
+
+Personality: Warm, encouraging, practical. Give specific actionable advice. Keep responses concise (2-4 sentences).
+
+User's tasks:
+${taskList || 'No tasks yet'}`;
+
+        const messages = [
+            { role: 'system', content: systemPrompt },
+            ...safeHistory.map(msg => ({
+                role: msg.role === 'user' ? 'user' : 'assistant',
+                content: (msg.text || '').slice(0, 2000)
+            })),
+            { role: 'user', content: safeMessage }
+        ];
+
+        const response = await fetch(GROQ_URL, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${GROQ_API_KEY}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                model: GROQ_MODEL,
+                messages,
+                temperature: 0.7,
+                max_tokens: 1024
+            })
+        });
+
+        const data = await response.json();
+
+        if (data.error) {
+            return res.status(500).json({ error: 'Chat failed' });
+        }
+
+        res.json({ response: data.choices?.[0]?.message?.content || "I'm here to help. What would you like to work on?" });
+
+    } catch (error) {
+        console.error('Chat error:', error);
+        res.status(500).json({ error: 'Chat unavailable' });
+    }
+});
+
+app.post('/api/ai/curriculum', optionalAuth, rateLimiter('ai/curriculum'), async (req, res) => {
+    try {
+        if (!GROQ_API_KEY) {
+            return res.status(500).json({ error: 'AI service not configured' });
+        }
+
+        const { goal } = req.body;
+
+        if (!goal) {
+            return res.status(400).json({ error: 'Goal required' });
+        }
+
+        const safeGoalTitle = (goal.title || 'Goal').slice(0, 200);
+
+        const prompt = `Create a 4-phase learning curriculum for: "${safeGoalTitle}"
+
+Each phase has exactly 3 lessons. Return ONLY valid JSON:
+{"chapters": [
+  {"id": "ch-1", "title": "Phase 1: Foundation", "lessons": [{"id": "l1", "title": "Lesson", "duration": "10 min", "isLocked": false, "description": "Description"}, {"id": "l2", "title": "Lesson", "duration": "12 min", "isLocked": false, "description": "Description"}, {"id": "l3", "title": "Lesson", "duration": "10 min", "isLocked": false, "description": "Description"}], "quiz": []},
+  {"id": "ch-2", "title": "Phase 2: Building Skills", "lessons": [{"id": "l4", "title": "Lesson", "duration": "15 min", "isLocked": false, "description": "Description"}, {"id": "l5", "title": "Lesson", "duration": "12 min", "isLocked": false, "description": "Description"}, {"id": "l6", "title": "Lesson", "duration": "10 min", "isLocked": false, "description": "Description"}], "quiz": []},
+  {"id": "ch-3", "title": "Phase 3: Advanced Techniques", "lessons": [{"id": "l7", "title": "Lesson", "duration": "15 min", "isLocked": false, "description": "Description"}, {"id": "l8", "title": "Lesson", "duration": "12 min", "isLocked": false, "description": "Description"}, {"id": "l9", "title": "Lesson", "duration": "15 min", "isLocked": false, "description": "Description"}], "quiz": []},
+  {"id": "ch-4", "title": "Phase 4: Mastery", "lessons": [{"id": "l10", "title": "Lesson", "duration": "10 min", "isLocked": false, "description": "Description"}, {"id": "l11", "title": "Lesson", "duration": "12 min", "isLocked": false, "description": "Description"}, {"id": "l12", "title": "Lesson", "duration": "10 min", "isLocked": false, "description": "Description"}], "quiz": []}
+]}`;
+
+        const response = await fetch(GROQ_URL, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${GROQ_API_KEY}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                model: GROQ_MODEL,
+                messages: [
+                    { role: 'system', content: 'You are an expert curriculum designer.' },
+                    { role: 'user', content: prompt }
+                ],
+                temperature: 0.7,
+                max_tokens: 4096,
+                response_format: { type: "json_object" }
+            })
+        });
+
+        const data = await response.json();
+
+        if (data.error) {
+            return res.status(500).json({ error: 'Curriculum generation failed' });
+        }
+
+        const content = data.choices?.[0]?.message?.content || '';
+        
+        try {
+            const parsed = JSON.parse(content);
+            res.json({ chapters: Array.isArray(parsed.chapters || parsed) ? (parsed.chapters || parsed) : [] });
+        } catch {
+            res.json({ chapters: [] });
+        }
+
+    } catch (error) {
+        console.error('Curriculum error:', error);
+        res.status(500).json({ error: 'Curriculum generation unavailable' });
+    }
+});
+
+app.get('/api/ai/rate-limit-status', (req, res) => {
+    const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.ip || 'unknown';
+    const status = {};
+    
+    for (const endpoint of Object.keys(RATE_LIMITS)) {
+        const entry = rateLimits.get(`${ip}:anon:${endpoint}`);
+        const limits = RATE_LIMITS[endpoint];
+        status[endpoint] = entry 
+            ? { used: entry.count, limit: limits.maxRequests, remaining: Math.max(0, limits.maxRequests - entry.count) }
+            : { used: 0, limit: limits.maxRequests, remaining: limits.maxRequests };
+    }
+    
+    res.json({ ip, status });
+});
+
+// ============================================
+// CLEANUP JOBS
+// ============================================
+
 setInterval(() => {
     const now = Date.now();
     for (const [email, data] of pendingUsers.entries()) {
-        if (data.expiresAt < now) {
-            pendingUsers.delete(email);
-        }
+        if (data.expiresAt < now) pendingUsers.delete(email);
     }
 }, 10 * 60 * 1000);
 
+// ============================================
+// START SERVER
+// ============================================
+
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`🤖 AI: ${GROQ_API_KEY ? 'Configured' : 'NOT CONFIGURED'}`);
 });
-
