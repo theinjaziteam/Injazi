@@ -50,7 +50,7 @@ const GoalSchema = new mongoose.Schema({
 });
 
 // ============================================
-// ADGEM OFFER SCHEMA (Cached offers from API)
+// ADGEM OFFER SCHEMA
 // ============================================
 const AdgemOfferSchema = new mongoose.Schema({
     id: String,
@@ -79,7 +79,7 @@ const AdgemOfferSchema = new mongoose.Schema({
 });
 
 // ============================================
-// ADGEM TRANSACTION SCHEMA (Completed offers)
+// ADGEM TRANSACTION SCHEMA
 // ============================================
 const AdgemTransactionSchema = new mongoose.Schema({
     transactionId: { type: String, required: true },
@@ -95,12 +95,19 @@ const AdgemTransactionSchema = new mongoose.Schema({
 });
 
 // ============================================
-// USER SCHEMA
+// USER SCHEMA - WITH EMAIL VERIFICATION
 // ============================================
 const UserSchema = new mongoose.Schema({
     // Authentication
     email: { type: String, required: true, unique: true },
     password: { type: String, required: true },
+    
+    // EMAIL VERIFICATION FIELDS
+    isEmailVerified: { type: Boolean, default: false },
+    emailVerificationCode: String,
+    emailVerificationExpires: Number,
+    passwordResetCode: String,
+    passwordResetExpires: Number,
     
     // Profile
     name: { type: String, default: 'Architect' },
@@ -136,6 +143,7 @@ const UserSchema = new mongoose.Schema({
     myCourses: { type: Array, default: [] },
     myProducts: { type: Array, default: [] },
     completedLessonIds: { type: Array, default: [] },
+    extraLogs: { type: Array, default: [] },
     
     // Notifications & Alerts
     agentAlerts: { type: Array, default: [] }
