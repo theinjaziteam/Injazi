@@ -53,8 +53,8 @@ const GoalSchema = new mongoose.Schema({
 // ADGEM OFFER SCHEMA (Cached offers from API)
 // ============================================
 const AdgemOfferSchema = new mongoose.Schema({
-    odId visibleId: String,
-    
+    id: String,
+    visibleId: String,
     storeId: String,
     trackingType: String,
     epc: String,
