@@ -53,7 +53,8 @@ const GoalSchema = new mongoose.Schema({
 // ADGEM TRANSACTION SCHEMA
 // ============================================
 const AdgemTransactionSchema = new mongoose.Schema({
-    transactionId: { type: String, required: true, unique: true },
+    transactionId: { type: String, required: true },
+    visibleId: String,
     campaignId: String,
     offerId: String,
     offerName: String,
@@ -62,30 +63,6 @@ const AdgemTransactionSchema = new mongoose.Schema({
     goalId: String,
     goalName: String,
     completedAt: { type: Number, default: Date.now }
-});
-
-// ============================================
-// EARN TASK SCHEMA (for AdGem offers)
-// ============================================
-const EarnTaskSchema = new mongoose.Schema({
-    id: String,
-    adgemOfferId: String,           // AdGem offer/campaign ID
-    adgemCampaignId: String,
-    title: String,
-    subtitle: String,
-    description: String,
-    iconUrl: String,                // App icon from AdGem
-    reward: Number,                 // Credits reward
-    payoutUsd: Number,              // Actual USD payout
-    progress: { type: Number, default: 0 },
-    maxProgress: { type: Number, default: 1 },
-    isCompleted: { type: Boolean, default: false },
-    completedAt: Number,
-    clickUrl: String,               // AdGem tracking URL
-    requirements: String,           // e.g., "Reach Level 10"
-    category: String,               // e.g., "Games", "Shopping", "Surveys"
-    platform: String,               // ios, android, web
-    expiresAt: Number
 });
 
 // ============================================
@@ -119,9 +96,7 @@ const UserSchema = new mongoose.Schema({
     dailyTasks: [TaskSchema],
     
     // AdGem Integration
-    earnTasks: [EarnTaskSchema],                    // Available offers from AdGem
-    adgemTransactions: [AdgemTransactionSchema],    // Completed offer history
-    adgemLastSync: Number,                          // Last time offers were fetched
+    adgemTransactions: [AdgemTransactionSchema],
     
     // Flexible Collections
     chatHistory: { type: Array, default: [] },
