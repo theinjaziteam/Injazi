@@ -21,6 +21,12 @@ const FROM_EMAIL = process.env.FROM_EMAIL || 'InJazi <noreply@injazi.app>';
 const ADGEM_APP_ID = process.env.ADGEM_APP_ID;
 const ADGEM_POSTBACK_KEY = process.env.ADGEM_POSTBACK_KEY;
 
+// ============================================
+// TEMPORARY STORAGE FOR UNVERIFIED USERS
+// In production, use Redis with TTL
+// ============================================
+const pendingUsers = new Map(); // email -> { userData, code, expiresAt, lastSentAt }
+
 // CORS setup
 const allowedOrigins = [
     process.env.FRONTEND_URL,
@@ -55,6 +61,10 @@ const generateVerificationCode = () => {
     return Math.floor(100000 + Math.random() * 900000).toString();
 };
 
+// Cooldown check (5 minutes = 300000ms)
+const RESEND_COOLDOWN = 5 * 60 * 1000; // 5 minutes
+const CODE_EXPIRY = 15 * 60 * 1000; // 15 minutes
+
 // ============================================
 // EMAIL SENDING FUNCTION (using Resend)
 // ============================================
@@ -62,6 +72,7 @@ async function sendEmail(to, subject, html) {
     if (!RESEND_API_KEY) {
         console.log('⚠️ No RESEND_API_KEY - Email not sent');
         console.log(`📧 Would send to ${to}: ${subject}`);
+        // For testing without email, log the code
         return { success: true, mock: true };
     }
 
@@ -184,7 +195,8 @@ app.get('/', (req, res) => {
         timestamp: new Date().toISOString(),
         database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
         emailConfigured: !!RESEND_API_KEY,
-        adgemConfigured: !!ADGEM_APP_ID
+        adgemConfigured: !!ADGEM_APP_ID,
+        pendingRegistrations: pendingUsers.size
     });
 });
 
@@ -196,59 +208,90 @@ app.get('/api/health', (req, res) => {
 });
 
 // ============================================
-// AUTH ENDPOINT - WITH EMAIL VERIFICATION
+// AUTH ENDPOINT - REGISTER STORES IN TEMP, LOGIN CHECKS DB
 // ============================================
 app.post('/api/auth', async (req, res) => {
     try {
         const { email, password, name, country, isRegister } = req.body;
+        const normalizedEmail = email.toLowerCase().trim();
 
         if (isRegister) {
-            // REGISTRATION
-            const existingUser = await User.findOne({ email });
+            // ============================================
+            // REGISTRATION - Store in temporary memory
+            // ============================================
+            
+            // Check if user already exists in DB
+            const existingUser = await User.findOne({ email: normalizedEmail });
             if (existingUser) {
-                return res.status(400).json({ message: 'User already exists' });
+                return res.status(400).json({ message: 'User already exists. Please log in.' });
             }
 
+            // Check if already pending verification
+            const existingPending = pendingUsers.get(normalizedEmail);
+            if (existingPending && existingPending.expiresAt > Date.now()) {
+                // Already pending - check cooldown for resend
+                const timeSinceLastSent = Date.now() - existingPending.lastSentAt;
+                const timeRemaining = Math.ceil((RESEND_COOLDOWN - timeSinceLastSent) / 1000);
+                
+                if (timeSinceLastSent < RESEND_COOLDOWN) {
+                    return res.status(400).json({ 
+                        message: `Please wait ${Math.ceil(timeRemaining / 60)} minutes before requesting a new code.`,
+                        cooldownRemaining: timeRemaining,
+                        requiresVerification: true
+                    });
+                }
+            }
+
+            // Hash password
             const hashedPassword = await bcrypt.hash(password, 10);
             const verificationCode = generateVerificationCode();
             
-            const user = new User({
-                email,
-                password: hashedPassword,
-                name: name || 'Architect',
-                country: country || 'Unknown',
-                createdAt: Date.now(),
-                isEmailVerified: false,
-                emailVerificationCode: verificationCode,
-                emailVerificationExpires: Date.now() + 15 * 60 * 1000 // 15 minutes
+            // Store in temporary memory (NOT database)
+            pendingUsers.set(normalizedEmail, {
+                userData: {
+                    email: normalizedEmail,
+                    password: hashedPassword,
+                    name: name || 'Architect',
+                    country: country || 'Unknown',
+                    createdAt: Date.now()
+                },
+                code: verificationCode,
+                expiresAt: Date.now() + CODE_EXPIRY,
+                lastSentAt: Date.now()
             });
 
-            await user.save();
+            console.log(`📝 Pending registration for ${normalizedEmail}, code: ${verificationCode}`);
 
             // Send verification email
             await sendEmail(
-                email,
+                normalizedEmail,
                 'Verify your InJazi account',
                 getVerificationEmailHtml(verificationCode, name)
             );
 
-            const token = generateToken(user._id);
-            const userObj = user.toObject();
-            delete userObj.password;
-            delete userObj.emailVerificationCode;
-            delete userObj.passwordResetCode;
-
             return res.json({ 
-                user: userObj, 
-                token,
+                success: true,
                 requiresVerification: true,
                 message: 'Verification code sent to your email'
             });
+
         } else {
-            // LOGIN
-            const user = await User.findOne({ email });
+            // ============================================
+            // LOGIN - Only check database (verified users)
+            // ============================================
+            
+            // Check if user is pending verification
+            const pendingUser = pendingUsers.get(normalizedEmail);
+            if (pendingUser && pendingUser.expiresAt > Date.now()) {
+                return res.status(400).json({ 
+                    message: 'Please verify your email first.',
+                    requiresVerification: true
+                });
+            }
+
+            const user = await User.findOne({ email: normalizedEmail });
             if (!user) {
-                return res.status(400).json({ message: 'User not found' });
+                return res.status(400).json({ message: 'User not found. Please sign up.' });
             }
 
             const isMatch = await bcrypt.compare(password, user.password);
@@ -259,13 +302,11 @@ app.post('/api/auth', async (req, res) => {
             const token = generateToken(user._id);
             const userObj = user.toObject();
             delete userObj.password;
-            delete userObj.emailVerificationCode;
-            delete userObj.passwordResetCode;
 
             return res.json({ 
                 user: userObj, 
                 token,
-                requiresVerification: !user.isEmailVerified
+                requiresVerification: false
             });
         }
     } catch (error) {
@@ -275,38 +316,56 @@ app.post('/api/auth', async (req, res) => {
 });
 
 // ============================================
-// VERIFY EMAIL ENDPOINT
+// VERIFY EMAIL - Creates user in DB if valid
 // ============================================
 app.post('/api/auth/verify-email', async (req, res) => {
     try {
         const { email, code } = req.body;
+        const normalizedEmail = email.toLowerCase().trim();
 
-        const user = await User.findOne({ email });
-        if (!user) {
-            return res.status(400).json({ message: 'User not found' });
+        const pending = pendingUsers.get(normalizedEmail);
+        
+        if (!pending) {
+            return res.status(400).json({ message: 'No pending verification found. Please register again.' });
         }
 
-        if (user.isEmailVerified) {
-            return res.json({ success: true, message: 'Email already verified' });
+        if (pending.expiresAt < Date.now()) {
+            pendingUsers.delete(normalizedEmail);
+            return res.status(400).json({ message: 'Verification code expired. Please register again.' });
         }
 
-        if (user.emailVerificationCode !== code) {
+        if (pending.code !== code) {
             return res.status(400).json({ message: 'Invalid verification code' });
         }
 
-        if (user.emailVerificationExpires < Date.now()) {
-            return res.status(400).json({ message: 'Verification code expired. Request a new one.' });
-        }
+        // Code is valid - create user in database
+        const user = new User({
+            email: pending.userData.email,
+            password: pending.userData.password,
+            name: pending.userData.name,
+            country: pending.userData.country,
+            createdAt: pending.userData.createdAt,
+            isEmailVerified: true
+        });
 
-        // Mark as verified
-        user.isEmailVerified = true;
-        user.emailVerificationCode = undefined;
-        user.emailVerificationExpires = undefined;
         await user.save();
+        
+        // Remove from pending
+        pendingUsers.delete(normalizedEmail);
 
-        console.log('✅ Email verified for:', email);
+        console.log('✅ User verified and created:', normalizedEmail);
 
-        res.json({ success: true, message: 'Email verified successfully' });
+        // Generate token
+        const token = generateToken(user._id);
+        const userObj = user.toObject();
+        delete userObj.password;
+
+        res.json({ 
+            success: true, 
+            message: 'Email verified successfully',
+            user: userObj,
+            token
+        });
     } catch (error) {
         console.error('Verify email error:', error);
         res.status(500).json({ message: error.message });
@@ -314,33 +373,53 @@ app.post('/api/auth/verify-email', async (req, res) => {
 });
 
 // ============================================
-// RESEND VERIFICATION CODE
+// RESEND VERIFICATION CODE - With 5 min cooldown
 // ============================================
 app.post('/api/auth/resend-verification', async (req, res) => {
     try {
         const { email } = req.body;
+        const normalizedEmail = email.toLowerCase().trim();
 
-        const user = await User.findOne({ email });
-        if (!user) {
-            return res.status(400).json({ message: 'User not found' });
+        const pending = pendingUsers.get(normalizedEmail);
+        
+        if (!pending) {
+            return res.status(400).json({ message: 'No pending verification found. Please register again.' });
         }
 
-        if (user.isEmailVerified) {
-            return res.json({ success: true, message: 'Email already verified' });
+        // Check cooldown (5 minutes)
+        const timeSinceLastSent = Date.now() - pending.lastSentAt;
+        if (timeSinceLastSent < RESEND_COOLDOWN) {
+            const timeRemaining = Math.ceil((RESEND_COOLDOWN - timeSinceLastSent) / 1000);
+            const minutesRemaining = Math.ceil(timeRemaining / 60);
+            const secondsRemaining = timeRemaining % 60;
+            
+            return res.status(400).json({ 
+                message: `Please wait ${minutesRemaining}m ${secondsRemaining}s before requesting a new code.`,
+                cooldownRemaining: timeRemaining
+            });
         }
 
+        // Generate new code
         const newCode = generateVerificationCode();
-        user.emailVerificationCode = newCode;
-        user.emailVerificationExpires = Date.now() + 15 * 60 * 1000;
-        await user.save();
+        pending.code = newCode;
+        pending.expiresAt = Date.now() + CODE_EXPIRY;
+        pending.lastSentAt = Date.now();
+        
+        pendingUsers.set(normalizedEmail, pending);
+
+        console.log(`📝 Resent code for ${normalizedEmail}, new code: ${newCode}`);
 
         await sendEmail(
-            email,
+            normalizedEmail,
             'Your new InJazi verification code',
-            getVerificationEmailHtml(newCode, user.name)
+            getVerificationEmailHtml(newCode, pending.userData.name)
         );
 
-        res.json({ success: true, message: 'New verification code sent' });
+        res.json({ 
+            success: true, 
+            message: 'New verification code sent',
+            cooldownRemaining: RESEND_COOLDOWN / 1000
+        });
     } catch (error) {
         console.error('Resend verification error:', error);
         res.status(500).json({ message: error.message });
@@ -348,25 +427,36 @@ app.post('/api/auth/resend-verification', async (req, res) => {
 });
 
 // ============================================
-// FORGOT PASSWORD - REQUEST RESET
+// FORGOT PASSWORD - REQUEST RESET (for existing users)
 // ============================================
 app.post('/api/auth/forgot-password', async (req, res) => {
     try {
         const { email } = req.body;
+        const normalizedEmail = email.toLowerCase().trim();
 
-        const user = await User.findOne({ email });
+        const user = await User.findOne({ email: normalizedEmail });
         if (!user) {
             // Don't reveal if user exists
             return res.json({ success: true, message: 'If this email exists, a reset code was sent.' });
         }
 
+        // Check cooldown
+        if (user.passwordResetLastSent && Date.now() - user.passwordResetLastSent < RESEND_COOLDOWN) {
+            const timeRemaining = Math.ceil((RESEND_COOLDOWN - (Date.now() - user.passwordResetLastSent)) / 1000);
+            return res.status(400).json({ 
+                message: `Please wait ${Math.ceil(timeRemaining / 60)} minutes before requesting a new code.`,
+                cooldownRemaining: timeRemaining
+            });
+        }
+
         const resetCode = generateVerificationCode();
         user.passwordResetCode = resetCode;
-        user.passwordResetExpires = Date.now() + 15 * 60 * 1000;
+        user.passwordResetExpires = Date.now() + CODE_EXPIRY;
+        user.passwordResetLastSent = Date.now();
         await user.save();
 
         await sendEmail(
-            email,
+            normalizedEmail,
             'Reset your InJazi password',
             getPasswordResetEmailHtml(resetCode, user.name)
         );
@@ -384,8 +474,9 @@ app.post('/api/auth/forgot-password', async (req, res) => {
 app.post('/api/auth/reset-password', async (req, res) => {
     try {
         const { email, code, newPassword } = req.body;
+        const normalizedEmail = email.toLowerCase().trim();
 
-        const user = await User.findOne({ email });
+        const user = await User.findOne({ email: normalizedEmail });
         if (!user) {
             return res.status(400).json({ message: 'User not found' });
         }
@@ -402,9 +493,10 @@ app.post('/api/auth/reset-password', async (req, res) => {
         user.password = hashedPassword;
         user.passwordResetCode = undefined;
         user.passwordResetExpires = undefined;
+        user.passwordResetLastSent = undefined;
         await user.save();
 
-        console.log('✅ Password reset for:', email);
+        console.log('✅ Password reset for:', normalizedEmail);
 
         res.json({ success: true, message: 'Password reset successfully' });
     } catch (error) {
@@ -467,7 +559,7 @@ app.get('/api/user/:email', async (req, res) => {
 });
 
 // ============================================
-// ADGEM OFFERS API - Fetch offers from AdGem
+// ADGEM OFFERS API
 // ============================================
 app.get('/api/adgem/offers', async (req, res) => {
     try {
@@ -482,16 +574,13 @@ app.get('/api/adgem/offers', async (req, res) => {
             return res.json({ status: 'success', offers: [], message: 'AdGem not configured' });
         }
 
-        // Get user's IP and user agent for AdGem API
         const userIp = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress || '0.0.0.0';
         const userAgent = req.headers['user-agent'] || '';
         
-        // Detect platform
         let platform = 'web';
         if (/android/i.test(userAgent)) platform = 'android';
         else if (/iphone|ipad|ipod/i.test(userAgent)) platform = 'ios';
 
-        // Build AdGem API URL
         const adgemUrl = new URL('https://api.adgem.com/v1/wall/json');
         adgemUrl.searchParams.append('appid', ADGEM_APP_ID);
         adgemUrl.searchParams.append('playerid', email);
@@ -506,11 +595,9 @@ app.get('/api/adgem/offers', async (req, res) => {
         const data = await response.json();
 
         if (data.status !== 'success' || !data.data?.[0]?.data) {
-            console.log('⚠️ AdGem API returned no offers');
             return res.json({ status: 'success', offers: [] });
         }
 
-        // Transform AdGem offers to our format
         const offers = data.data[0].data.map(offer => ({
             id: `adgem-${offer.store_id || offer.name?.replace(/\s+/g, '-').toLowerCase() || Date.now()}`,
             storeId: offer.store_id,
@@ -532,14 +619,10 @@ app.get('/api/adgem/offers', async (req, res) => {
             os: offer.OS
         }));
 
-        // Get user's completed transactions to filter out completed offers
         const user = await User.findOne({ email });
         const completedOfferIds = (user?.adgemTransactions || []).map(t => t.offerId);
-        
-        // Filter out already completed offers
         const availableOffers = offers.filter(o => !completedOfferIds.includes(o.storeId));
 
-        // Cache offers in user document
         await User.findOneAndUpdate(
             { email },
             { 
@@ -547,8 +630,6 @@ app.get('/api/adgem/offers', async (req, res) => {
                 adgemLastSync: Date.now()
             }
         );
-
-        console.log(`✅ Fetched ${availableOffers.length} offers for ${email}`);
 
         res.json({ 
             status: 'success', 
@@ -563,12 +644,10 @@ app.get('/api/adgem/offers', async (req, res) => {
 });
 
 // ============================================
-// ADGEM POSTBACK - Receives conversion notifications
+// ADGEM POSTBACK
 // ============================================
 app.get('/api/adgem/postback', async (req, res) => {
     try {
-        console.log('📥 AdGem Postback Received:', req.query);
-
         const {
             player_id,
             amount,
@@ -582,34 +661,27 @@ app.get('/api/adgem/postback', async (req, res) => {
             store_id
         } = req.query;
 
-        // Validate required fields
         if (!player_id || !transaction_id) {
-            console.error('❌ Missing required fields');
             return res.status(400).send('Missing required fields');
         }
 
-        // Find user
         const user = await User.findOne({ email: player_id });
         
         if (!user) {
-            console.error('❌ User not found:', player_id);
             return res.status(404).send('User not found');
         }
 
-        // Check for duplicate transaction
         const existingTransaction = user.adgemTransactions?.find(
             t => t.transactionId === transaction_id
         );
         
         if (existingTransaction) {
-            console.log('⚠️ Duplicate transaction:', transaction_id);
             return res.status(200).send('OK');
         }
 
         const creditsToAdd = parseInt(amount) || 0;
         const payoutAmount = parseFloat(payout) || 0;
 
-        // Credit user and record transaction
         await User.findOneAndUpdate(
             { email: player_id },
             {
@@ -634,7 +706,7 @@ app.get('/api/adgem/postback', async (req, res) => {
             }
         );
 
-        console.log(`✅ Credited ${creditsToAdd} credits to ${player_id} for: ${offer_name}`);
+        console.log(`✅ Credited ${creditsToAdd} credits to ${player_id}`);
         
         res.status(200).send('OK');
 
@@ -649,25 +721,53 @@ app.get('/api/adgem/postback', async (req, res) => {
 // ============================================
 app.get('/api/debug/:email', async (req, res) => {
     try {
-        const user = await User.findOne({ email: req.params.email });
-        if (!user) return res.status(404).json({ message: 'User not found' });
+        const normalizedEmail = req.params.email.toLowerCase().trim();
+        
+        // Check pending users
+        const pending = pendingUsers.get(normalizedEmail);
+        
+        // Check database
+        const user = await User.findOne({ email: normalizedEmail });
         
         res.json({
-            email: user.email,
-            name: user.name,
-            isEmailVerified: user.isEmailVerified,
-            credits: user.credits,
-            currentDay: user.currentDay,
-            hasGoal: !!user.goal,
-            adgemOffersCount: user.adgemOffers?.length || 0,
-            adgemTransactionsCount: user.adgemTransactions?.length || 0,
-            adgemLastSync: user.adgemLastSync,
-            recentTransactions: (user.adgemTransactions || []).slice(-5)
+            email: normalizedEmail,
+            isPending: !!pending,
+            pendingInfo: pending ? {
+                code: pending.code,
+                expiresAt: new Date(pending.expiresAt).toISOString(),
+                lastSentAt: new Date(pending.lastSentAt).toISOString(),
+                cooldownRemaining: Math.max(0, Math.ceil((RESEND_COOLDOWN - (Date.now() - pending.lastSentAt)) / 1000))
+            } : null,
+            isInDatabase: !!user,
+            userInfo: user ? {
+                name: user.name,
+                isEmailVerified: user.isEmailVerified,
+                credits: user.credits,
+                currentDay: user.currentDay,
+                hasGoal: !!user.goal
+            } : null
         });
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
 });
+
+// ============================================
+// CLEANUP - Remove expired pending registrations every 10 minutes
+// ============================================
+setInterval(() => {
+    const now = Date.now();
+    let cleaned = 0;
+    for (const [email, data] of pendingUsers.entries()) {
+        if (data.expiresAt < now) {
+            pendingUsers.delete(email);
+            cleaned++;
+        }
+    }
+    if (cleaned > 0) {
+        console.log(`🧹 Cleaned ${cleaned} expired pending registrations`);
+    }
+}, 10 * 60 * 1000); // Every 10 minutes
 
 // ============================================
 // ERROR HANDLER
