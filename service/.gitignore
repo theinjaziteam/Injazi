@@ -1,12 +1,23 @@
+# Dependencies
 node_modules/
+
+# Environment variables - NEVER COMMIT
 .env
 .env.local
 .env.production
+.env*.local
+
+# Logs
+logs/
 *.log
+npm-debug.log*
+
+# OS files
 .DS_Store
-.vscode/
+Thumbs.db
+
+# IDE
 .idea/
-dist/
-build/
-coverage/
-.railway/
+.vscode/
+*.swp
+*.swo
