@@ -1,3 +1,4 @@
+// service/models.js
 import mongoose from 'mongoose';
 
 // ============================================
@@ -93,15 +94,18 @@ const AdgemTransactionSchema = new mongoose.Schema({
     goalName: String,
     completedAt: { type: Number, default: Date.now }
 });
+
 // ============================================
-// ECOMMERCE AGENT MODELS (Add to models.js)
+// E-COMMERCE SCHEMAS (NEW)
 // ============================================
 
-// Add these schemas to models.js:
-
+// Connected Account Schema
 const ConnectedAccountSchema = new mongoose.Schema({
     id: String,
-    platform: { type: String, enum: ['shopify', 'klaviyo', 'mailchimp', 'tiktok', 'instagram', 'facebook', 'youtube', 'google_analytics', 'meta_ads'] },
+    platform: { 
+        type: String, 
+        enum: ['shopify', 'klaviyo', 'mailchimp', 'tiktok', 'instagram', 'facebook', 'youtube', 'google_analytics', 'meta_ads'] 
+    },
     accessToken: String,
     refreshToken: String,
     expiresAt: Number,
@@ -111,17 +115,34 @@ const ConnectedAccountSchema = new mongoose.Schema({
     metadata: mongoose.Schema.Types.Mixed
 });
 
+// E-commerce Goal Schema
 const EcommerceGoalSchema = new mongoose.Schema({
     id: String,
     storeNiche: String,
     targetAudience: String,
-    pricingStrategy: { type: String, enum: ['budget', 'mid_range', 'premium', 'luxury'] },
+    pricingStrategy: { 
+        type: String, 
+        enum: ['budget', 'mid_range', 'premium', 'luxury'] 
+    },
     monthlyRevenueTarget: Number,
     preferredPlatforms: [String],
     createdAt: Number,
     updatedAt: Number
 });
 
+// Shipping Zone Schema
+const ShippingZoneSchema = new mongoose.Schema({
+    id: String,
+    name: String,
+    countries: [String],
+    rates: [{
+        name: String,
+        price: Number,
+        minOrder: Number
+    }]
+});
+
+// Shopify Store Schema
 const ShopifyStoreSchema = new mongoose.Schema({
     id: String,
     shopifyId: String,
@@ -130,51 +151,143 @@ const ShopifyStoreSchema = new mongoose.Schema({
     theme: String,
     currency: String,
     language: String,
-    status: { type: String, enum: ['pending', 'active', 'paused'], default: 'pending' },
+    status: { 
+        type: String, 
+        enum: ['pending', 'active', 'paused'], 
+        default: 'pending' 
+    },
     createdAt: Number,
     settings: {
         paymentProviders: [String],
-        shippingZones: [{
-            id: String,
-            name: String,
-            countries: [String],
-            rates: [{ name: String, price: Number, minOrder: Number }]
-        }]
+        shippingZones: [ShippingZoneSchema]
     }
 });
 
+// Product Variant Schema
+const ProductVariantSchema = new mongoose.Schema({
+    id: String,
+    title: String,
+    sku: String,
+    price: Number,
+    inventoryQuantity: Number,
+    options: mongoose.Schema.Types.Mixed
+});
+
+// Product Draft Schema
 const ProductDraftSchema = new mongoose.Schema({
     id: String,
     sourceUrl: String,
-    sourcePlatform: { type: String, enum: ['aliexpress', 'amazon', 'alibaba', 'other'] },
+    sourcePlatform: { 
+        type: String, 
+        enum: ['aliexpress', 'amazon', 'alibaba', 'other'] 
+    },
     scrapedAt: Number,
-    status: { type: String, enum: ['scraped', 'optimized', 'approved', 'published', 'rejected'], default: 'scraped' },
-    originalData: mongoose.Schema.Types.Mixed,
-    optimizedData: mongoose.Schema.Types.Mixed,
-    finalData: mongoose.Schema.Types.Mixed,
+    status: { 
+        type: String, 
+        enum: ['scraped', 'optimized', 'approved', 'published', 'rejected'], 
+        default: 'scraped' 
+    },
+    originalData: {
+        title: String,
+        description: String,
+        images: [String],
+        variants: [ProductVariantSchema],
+        specs: mongoose.Schema.Types.Mixed,
+        originalPrice: Number,
+        currency: String
+    },
+    optimizedData: {
+        title: String,
+        description: String,
+        seoTitle: String,
+        seoDescription: String,
+        tags: [String],
+        collections: [String]
+    },
+    finalData: {
+        title: String,
+        description: String,
+        price: Number,
+        compareAtPrice: Number,
+        profitMargin: Number,
+        images: [String],
+        variants: [ProductVariantSchema],
+        tags: [String],
+        collections: [String]
+    },
     shopifyProductId: String,
     publishedAt: Number
 });
 
+// AI Insight Schema
+const AIInsightSchema = new mongoose.Schema({
+    id: String,
+    type: { 
+        type: String, 
+        enum: ['positive', 'negative', 'neutral', 'action_required'] 
+    },
+    title: String,
+    description: String,
+    metric: String,
+    change: Number,
+    suggestedAction: String,
+    priority: { 
+        type: String, 
+        enum: ['high', 'medium', 'low'] 
+    }
+});
+
+// Analytics Snapshot Schema
 const AnalyticsSnapshotSchema = new mongoose.Schema({
     id: String,
     timestamp: Number,
-    period: { type: String, enum: ['daily', 'weekly', 'monthly'] },
+    period: { 
+        type: String, 
+        enum: ['daily', 'weekly', 'monthly'] 
+    },
     revenue: Number,
     orders: Number,
     conversionRate: Number,
     averageOrderValue: Number,
-    traffic: mongoose.Schema.Types.Mixed,
-    topProducts: [mongoose.Schema.Types.Mixed],
-    underperformingProducts: [mongoose.Schema.Types.Mixed],
-    cartAbandonment: mongoose.Schema.Types.Mixed,
-    insights: [mongoose.Schema.Types.Mixed]
+    traffic: {
+        total: Number,
+        organic: Number,
+        paid: Number,
+        social: Number,
+        direct: Number
+    },
+    topProducts: [{
+        productId: String,
+        title: String,
+        revenue: Number,
+        units: Number
+    }],
+    underperformingProducts: [{
+        productId: String,
+        title: String,
+        views: Number,
+        conversionRate: Number
+    }],
+    cartAbandonment: {
+        rate: Number,
+        recoveredRevenue: Number,
+        abandonedCarts: Number
+    },
+    insights: [AIInsightSchema]
 });
 
+// Email Campaign Draft Schema
 const EmailCampaignDraftSchema = new mongoose.Schema({
     id: String,
-    type: { type: String, enum: ['launch', 'abandoned_cart', 'promo', 'newsletter', 'welcome', 'win_back'] },
-    status: { type: String, enum: ['draft', 'preview', 'approved', 'scheduled', 'sent'], default: 'draft' },
+    type: { 
+        type: String, 
+        enum: ['launch', 'abandoned_cart', 'promo', 'newsletter', 'welcome', 'win_back'] 
+    },
+    status: { 
+        type: String, 
+        enum: ['draft', 'preview', 'approved', 'scheduled', 'sent'], 
+        default: 'draft' 
+    },
     createdAt: Number,
     subject: String,
     preheader: String,
@@ -185,14 +298,32 @@ const EmailCampaignDraftSchema = new mongoose.Schema({
     recipientCount: Number,
     scheduledAt: Number,
     sentAt: Number,
-    metrics: mongoose.Schema.Types.Mixed
+    metrics: {
+        sent: Number,
+        delivered: Number,
+        opened: Number,
+        clicked: Number,
+        unsubscribed: Number,
+        revenue: Number
+    }
 });
 
+// Social Content Draft Schema
 const SocialContentDraftSchema = new mongoose.Schema({
     id: String,
-    platform: { type: String, enum: ['tiktok', 'instagram', 'facebook', 'youtube'] },
-    contentType: { type: String, enum: ['post', 'story', 'reel', 'short', 'video'] },
-    status: { type: String, enum: ['draft', 'preview', 'approved', 'scheduled', 'published'], default: 'draft' },
+    platform: { 
+        type: String, 
+        enum: ['tiktok', 'instagram', 'facebook', 'youtube'] 
+    },
+    contentType: { 
+        type: String, 
+        enum: ['post', 'story', 'reel', 'short', 'video'] 
+    },
+    status: { 
+        type: String, 
+        enum: ['draft', 'preview', 'approved', 'scheduled', 'published'], 
+        default: 'draft' 
+    },
     createdAt: Number,
     caption: String,
     hashtags: [String],
@@ -201,20 +332,38 @@ const SocialContentDraftSchema = new mongoose.Schema({
     linkedProductId: String,
     scheduledAt: Number,
     publishedAt: Number,
-    metrics: mongoose.Schema.Types.Mixed
+    metrics: {
+        views: Number,
+        likes: Number,
+        comments: Number,
+        shares: Number,
+        clicks: Number
+    }
 });
 
+// AI Action Log Schema
 const AIActionLogSchema = new mongoose.Schema({
     id: String,
     timestamp: Number,
-    agentType: { type: String, enum: ['shopify_setup', 'product_ingestion', 'analytics', 'email_marketing', 'social_media'] },
-    actionType: { type: String, enum: ['suggest', 'read_only', 'execute_with_approval', 'auto_execute'] },
-    status: { type: String, enum: ['pending', 'approved', 'rejected', 'executed', 'failed'], default: 'pending' },
+    agentType: { 
+        type: String, 
+        enum: ['shopify_setup', 'product_ingestion', 'analytics', 'email_marketing', 'social_media'] 
+    },
+    actionType: { 
+        type: String, 
+        enum: ['suggest', 'read_only', 'execute_with_approval', 'auto_execute'] 
+    },
+    status: { 
+        type: String, 
+        enum: ['pending', 'approved', 'rejected', 'executed', 'failed'], 
+        default: 'pending' 
+    },
     title: String,
     description: String,
     payload: mongoose.Schema.Types.Mixed,
     requiresApproval: Boolean,
     approvedAt: Number,
+    approvedBy: String,
     rejectedAt: Number,
     rejectedReason: String,
     executedAt: Number,
@@ -224,24 +373,50 @@ const AIActionLogSchema = new mongoose.Schema({
     reversedAt: Number
 });
 
-// Add to UserSchema:
-ecommerceGoal: EcommerceGoalSchema,
-shopifyStores: [ShopifyStoreSchema],
-productDrafts: [ProductDraftSchema],
-analyticsSnapshots: [AnalyticsSnapshotSchema],
-emailCampaignDrafts: [EmailCampaignDraftSchema],
-socialContentDrafts: [SocialContentDraftSchema],
-aiActionLogs: [AIActionLogSchema],
-connectedEcommerceAccounts: [ConnectedAccountSchema],
-agentSuggestions: [mongoose.Schema.Types.Mixed],
-masterAgentContext: mongoose.Schema.Types.Mixed
-*/
+// Agent Suggestion Schema
+const AgentSuggestionSchema = new mongoose.Schema({
+    id: String,
+    timestamp: Number,
+    agentType: String,
+    title: String,
+    description: String,
+    reasoning: String,
+    priority: { 
+        type: String, 
+        enum: ['high', 'medium', 'low'] 
+    },
+    actionPayload: mongoose.Schema.Types.Mixed,
+    estimatedImpact: String,
+    status: { 
+        type: String, 
+        enum: ['pending', 'accepted', 'dismissed', 'snoozed'], 
+        default: 'pending' 
+    },
+    snoozedUntil: Number
+});
 
-const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const GROQ_MODEL = 'llama-3.3-70b-versatile';
+// Master Agent Context Schema
+const MasterAgentContextSchema = new mongoose.Schema({
+    userId: String,
+    userPreferences: {
+        communicationStyle: { 
+            type: String, 
+            enum: ['detailed', 'concise'], 
+            default: 'detailed' 
+        },
+        autoApprove: [String],
+        notificationFrequency: { 
+            type: String, 
+            enum: ['realtime', 'daily', 'weekly'], 
+            default: 'daily' 
+        }
+    },
+    totalActionsExecuted: { type: Number, default: 0 },
+    successRate: { type: Number, default: 100 }
+});
+
 // ============================================
-// USER SCHEMA - WITH EMAIL VERIFICATION
+// USER SCHEMA - WITH EMAIL VERIFICATION & E-COMMERCE
 // ============================================
 const UserSchema = new mongoose.Schema({
     // Authentication
@@ -293,9 +468,24 @@ const UserSchema = new mongoose.Schema({
     extraLogs: { type: Array, default: [] },
     
     // Notifications & Alerts
-    agentAlerts: { type: Array, default: [] }
+    agentAlerts: { type: Array, default: [] },
+    
+    // Guide Conversations
+    guideConversations: { type: Array, default: [] },
+    
+    // ============================================
+    // E-COMMERCE AGENT FIELDS (NEW)
+    // ============================================
+    ecommerceGoal: EcommerceGoalSchema,
+    shopifyStores: [ShopifyStoreSchema],
+    productDrafts: [ProductDraftSchema],
+    analyticsSnapshots: [AnalyticsSnapshotSchema],
+    emailCampaignDrafts: [EmailCampaignDraftSchema],
+    socialContentDrafts: [SocialContentDraftSchema],
+    aiActionLogs: [AIActionLogSchema],
+    connectedEcommerceAccounts: [ConnectedAccountSchema],
+    agentSuggestions: [AgentSuggestionSchema],
+    masterAgentContext: MasterAgentContextSchema
 });
 
 export const User = mongoose.model('User', UserSchema);
-
-
