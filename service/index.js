@@ -967,5 +967,343 @@ app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`🤖 AI: ${GROQ_API_KEY ? 'Configured' : 'NOT CONFIGURED'}`);
 });
+// ============================================
+// ADMOB REWARDED ADS CALLBACKS
+// ============================================
+
+// Check if user can watch more ads today
+app.get('/api/admob/can-watch', async (req, res) => {
+    try {
+        const { email } = req.query;
+        
+        if (!email) {
+            return res.status(400).json({ error: 'Email required' });
+        }
+
+        const user = await User.findOne({ email: email.toLowerCase() });
+        if (!user) {
+            return res.json({ canWatch: true, adsRemaining: 10 });
+        }
+
+        // Reset daily count if needed
+        const today = new Date().setHours(0, 0, 0, 0);
+        if (!user.dailyAdCountResetAt || user.dailyAdCountResetAt < today) {
+            user.dailyAdCount = 0;
+            user.dailyAdCountResetAt = today;
+            await user.save();
+        }
+
+        const maxDaily = 10;
+        const adsRemaining = Math.max(0, maxDaily - (user.dailyAdCount || 0));
+        
+        res.json({
+            canWatch: adsRemaining > 0,
+            adsRemaining,
+            dailyLimit: maxDaily
+        });
+
+    } catch (error) {
+        console.error('Can watch check error:', error);
+        res.json({ canWatch: true, adsRemaining: 10 });
+    }
+});
+
+// Main AdMob SSV Callback Endpoint
+app.get('/api/admob/reward-callback', async (req, res) => {
+    try {
+        const {
+            ad_network,
+            ad_unit,
+            custom_data,
+            reward_amount,
+            reward_item,
+            signature,
+            key_id,
+            transaction_id,
+            user_id,
+            timestamp
+        } = req.query;
+
+        console.log('📺 AdMob Reward Callback received:', {
+            ad_unit,
+            reward_amount,
+            reward_item,
+            transaction_id,
+            user_id,
+            timestamp: new Date(parseInt(timestamp) || Date.now()).toISOString()
+        });
+
+        // Parse custom_data
+        let customDataParsed = {};
+        try {
+            customDataParsed = JSON.parse(decodeURIComponent(custom_data || '{}'));
+        } catch (e) {
+            if (custom_data) {
+                customDataParsed = { email: custom_data };
+            }
+        }
+
+        const userEmail = (customDataParsed.email || user_id || '').toLowerCase();
+        const rewardType = customDataParsed.rewardType || reward_item || 'credits';
+        const amount = parseInt(reward_amount) || customDataParsed.amount || 10;
+        const txnId = transaction_id || customDataParsed.transactionId || `auto_${Date.now()}`;
+
+        if (!userEmail) {
+            console.error('❌ AdMob callback: No user identifier provided');
+            return res.status(200).json({ success: false, error: 'Missing user identifier' });
+        }
+
+        // Find user
+        const user = await User.findOne({ email: userEmail });
+        if (!user) {
+            console.error('❌ AdMob callback: User not found:', userEmail);
+            return res.status(200).json({ success: false, error: 'User not found' });
+        }
+
+        // Initialize arrays if needed
+        if (!user.adRewardTransactions) user.adRewardTransactions = [];
+        if (!user.earnings) user.earnings = [];
+
+        // Check for duplicate transaction
+        const existingTxn = user.adRewardTransactions.find(t => t.transactionId === txnId);
+        if (existingTxn) {
+            console.log('⚠️ Duplicate transaction, already processed:', txnId);
+            return res.status(200).json({
+                success: true,
+                message: 'Already rewarded',
+                duplicate: true,
+                transactionId: txnId
+            });
+        }
+
+        // Apply reward based on type
+        let rewardDetails = {};
+        
+        switch (rewardType) {
+            case 'credits':
+                user.credits = (user.credits || 0) + amount;
+                rewardDetails = { credits: amount };
+                break;
+
+            case 'premium_time':
+                const premiumHours = amount || 24;
+                const currentPremiumEnd = user.premiumUntil ? new Date(user.premiumUntil) : new Date();
+                const newPremiumEnd = new Date(Math.max(currentPremiumEnd.getTime(), Date.now()) + premiumHours * 60 * 60 * 1000);
+                user.premiumUntil = newPremiumEnd;
+                user.isPremium = true;
+                rewardDetails = { premiumHours, premiumUntil: newPremiumEnd };
+                break;
+
+            case 'streak_freeze':
+                user.streakFreezes = (user.streakFreezes || 0) + (amount || 1);
+                rewardDetails = { streakFreezes: amount || 1 };
+                break;
+
+            case 'goal_slot':
+                user.maxGoalSlots = (user.maxGoalSlots || 3) + (amount || 1);
+                rewardDetails = { goalSlots: amount || 1, newTotal: user.maxGoalSlots };
+                break;
+
+            case 'real_money':
+                const moneyAmount = amount / 100; // Convert cents to dollars
+                user.realMoneyBalance = (user.realMoneyBalance || 0) + moneyAmount;
+                user.totalEarnings = (user.totalEarnings || 0) + moneyAmount;
+                rewardDetails = { realMoney: moneyAmount };
+                
+                // Add to earnings history
+                user.earnings.push({
+                    id: `earn_${Date.now()}`,
+                    date: Date.now(),
+                    amount: moneyAmount,
+                    type: 'ad_reward',
+                    status: 'completed',
+                    description: 'Rewarded ad bonus',
+                    reference: txnId
+                });
+                break;
+
+            case 'xp_boost':
+                user.totalXP = (user.totalXP || 0) + (amount * 10);
+                rewardDetails = { xpAdded: amount * 10 };
+                break;
+
+            default:
+                user.credits = (user.credits || 0) + amount;
+                rewardDetails = { credits: amount };
+        }
+
+        // Log the transaction
+        user.adRewardTransactions.push({
+            transactionId: txnId,
+            adUnit: ad_unit,
+            adNetwork: ad_network,
+            rewardType,
+            amount,
+            rewardDetails,
+            timestamp: Date.now(),
+            status: 'completed',
+            ipAddress: req.headers['x-forwarded-for']?.split(',')[0] || req.ip,
+            userAgent: req.headers['user-agent']
+        });
+
+        // Update ad count
+        const today = new Date().setHours(0, 0, 0, 0);
+        if (!user.dailyAdCountResetAt || user.dailyAdCountResetAt < today) {
+            user.dailyAdCount = 1;
+            user.dailyAdCountResetAt = today;
+        } else {
+            user.dailyAdCount = (user.dailyAdCount || 0) + 1;
+        }
+        
+        user.totalAdsWatched = (user.totalAdsWatched || 0) + 1;
+        user.lastAdWatchedAt = Date.now();
+
+        // Keep only last 100 ad transactions
+        if (user.adRewardTransactions.length > 100) {
+            user.adRewardTransactions = user.adRewardTransactions.slice(-100);
+        }
+
+        await user.save();
+
+        console.log('✅ AdMob reward applied:', {
+            user: userEmail,
+            rewardType,
+            amount,
+            transactionId: txnId,
+            newBalance: {
+                credits: user.credits,
+                realMoney: user.realMoneyBalance,
+                streakFreezes: user.streakFreezes
+            }
+        });
+
+        res.status(200).json({
+            success: true,
+            rewardApplied: true,
+            transactionId: txnId,
+            rewardType,
+            amount,
+            rewardDetails,
+            newBalance: {
+                credits: user.credits,
+                realMoney: user.realMoneyBalance,
+                streakFreezes: user.streakFreezes,
+                isPremium: user.isPremium
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ AdMob callback error:', error);
+        res.status(200).json({ success: false, error: error.message });
+    }
+});
+
+// POST version of callback
+app.post('/api/admob/reward-callback', async (req, res) => {
+    req.query = { ...req.query, ...req.body };
+    
+    // Forward to GET handler
+    const handler = app._router.stack.find(
+        r => r.route?.path === '/api/admob/reward-callback' && r.route?.methods?.get
+    );
+    
+    if (handler) {
+        return handler.route.stack[0].handle(req, res);
+    }
+    
+    res.status(500).json({ error: 'Handler not found' });
+});
+
+// Verify reward endpoint (called from client)
+app.post('/api/admob/verify-reward', async (req, res) => {
+    try {
+        const { email, transactionId } = req.body;
+
+        if (!email || !transactionId) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Email and transactionId are required' 
+            });
+        }
+
+        const user = await User.findOne({ email: email.toLowerCase() });
+        if (!user) {
+            return res.status(404).json({ 
+                success: false, 
+                error: 'User not found' 
+            });
+        }
+
+        const transaction = user.adRewardTransactions?.find(
+            t => t.transactionId === transactionId
+        );
+
+        if (transaction) {
+            res.json({
+                success: true,
+                rewarded: true,
+                transaction: {
+                    transactionId: transaction.transactionId,
+                    rewardType: transaction.rewardType,
+                    amount: transaction.amount,
+                    timestamp: transaction.timestamp,
+                    rewardDetails: transaction.rewardDetails
+                },
+                currentBalance: {
+                    credits: user.credits,
+                    realMoney: user.realMoneyBalance,
+                    streakFreezes: user.streakFreezes,
+                    isPremium: user.isPremium,
+                    premiumUntil: user.premiumUntil
+                }
+            });
+        } else {
+            res.json({
+                success: true,
+                rewarded: false,
+                message: 'Transaction not found yet, may still be processing'
+            });
+        }
+
+    } catch (error) {
+        console.error('Verify reward error:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: error.message 
+        });
+    }
+});
+
+// Get user's ad reward history
+app.get('/api/admob/history/:email', async (req, res) => {
+    try {
+        const user = await User.findOne({ email: req.params.email.toLowerCase() });
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        res.json({
+            success: true,
+            totalAdsWatched: user.totalAdsWatched || 0,
+            todayAdsWatched: user.dailyAdCount || 0,
+            dailyLimit: 10,
+            adsRemaining: Math.max(0, 10 - (user.dailyAdCount || 0)),
+            lastAdWatchedAt: user.lastAdWatchedAt,
+            recentTransactions: (user.adRewardTransactions || [])
+                .slice(-20)
+                .reverse()
+                .map(t => ({
+                    transactionId: t.transactionId,
+                    rewardType: t.rewardType,
+                    amount: t.amount,
+                    timestamp: t.timestamp
+                }))
+        });
+
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 
 
