@@ -1,4 +1,5 @@
 import express from 'express';
+import ecommerceRouter from './ecommerceAgent.js';
 import cors from 'cors';
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
@@ -737,8 +738,9 @@ setInterval(() => {
 // ============================================
 // START SERVER
 // ============================================
-
+app.use('/api/ecommerce', ecommerceRouter);
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`🤖 AI: ${GROQ_API_KEY ? 'Configured' : 'NOT CONFIGURED'}`);
 });
+
