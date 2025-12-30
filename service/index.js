@@ -18,6 +18,11 @@ const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_MODEL = 'llama-3.3-70b-versatile';
 
 // ============================================
+// ADMOB CONFIGURATION
+// ============================================
+const MAX_DAILY_ADS = 25; // Maximum ads per user per day
+
+// ============================================
 // RATE LIMITING
 // ============================================
 
@@ -159,6 +164,7 @@ app.get('/api/admob/health', (req, res) => {
         success: true,
         status: 'active',
         message: 'AdMob callback endpoint is healthy',
+        dailyAdLimit: MAX_DAILY_ADS,
         timestamp: Date.now()
     });
 });
@@ -169,12 +175,12 @@ app.get('/api/admob/can-watch', async (req, res) => {
         const { email } = req.query;
         
         if (!email) {
-            return res.status(200).json({ canWatch: true, adsRemaining: 10 });
+            return res.status(200).json({ canWatch: true, adsRemaining: MAX_DAILY_ADS, dailyLimit: MAX_DAILY_ADS });
         }
 
         const user = await User.findOne({ email: email.toLowerCase() });
         if (!user) {
-            return res.status(200).json({ canWatch: true, adsRemaining: 10 });
+            return res.status(200).json({ canWatch: true, adsRemaining: MAX_DAILY_ADS, dailyLimit: MAX_DAILY_ADS });
         }
 
         const today = new Date().setHours(0, 0, 0, 0);
@@ -184,18 +190,18 @@ app.get('/api/admob/can-watch', async (req, res) => {
             await user.save();
         }
 
-        const maxDaily = 10;
-        const adsRemaining = Math.max(0, maxDaily - (user.dailyAdCount || 0));
+        const adsRemaining = Math.max(0, MAX_DAILY_ADS - (user.dailyAdCount || 0));
         
         res.status(200).json({
             canWatch: adsRemaining > 0,
             adsRemaining,
-            dailyLimit: maxDaily
+            dailyLimit: MAX_DAILY_ADS,
+            adsWatchedToday: user.dailyAdCount || 0
         });
 
     } catch (error) {
         console.error('Can watch check error:', error);
-        res.status(200).json({ canWatch: true, adsRemaining: 10 });
+        res.status(200).json({ canWatch: true, adsRemaining: MAX_DAILY_ADS, dailyLimit: MAX_DAILY_ADS });
     }
 });
 
@@ -317,6 +323,23 @@ app.get('/api/admob/reward-callback', async (req, res) => {
             });
         }
 
+        // Check daily limit
+        const today = new Date().setHours(0, 0, 0, 0);
+        if (!user.dailyAdCountResetAt || user.dailyAdCountResetAt < today) {
+            user.dailyAdCount = 0;
+            user.dailyAdCountResetAt = today;
+        }
+        
+        if ((user.dailyAdCount || 0) >= MAX_DAILY_ADS) {
+            console.log('⚠️ Daily ad limit reached for:', userEmail);
+            return res.status(200).json({
+                success: true,
+                limitReached: true,
+                message: `Daily limit of ${MAX_DAILY_ADS} ads reached`,
+                timestamp: Date.now()
+            });
+        }
+
         // Apply reward
         let rewardDetails = {};
         
@@ -364,14 +387,7 @@ app.get('/api/admob/reward-callback', async (req, res) => {
         // Update counts
         user.totalAdsWatched = (user.totalAdsWatched || 0) + 1;
         user.lastAdWatchedAt = Date.now();
-        
-        const today = new Date().setHours(0, 0, 0, 0);
-        if (!user.dailyAdCountResetAt || user.dailyAdCountResetAt < today) {
-            user.dailyAdCount = 1;
-            user.dailyAdCountResetAt = today;
-        } else {
-            user.dailyAdCount = (user.dailyAdCount || 0) + 1;
-        }
+        user.dailyAdCount = (user.dailyAdCount || 0) + 1;
 
         // Trim old transactions
         if (user.adRewardTransactions.length > 100) {
@@ -380,14 +396,16 @@ app.get('/api/admob/reward-callback', async (req, res) => {
 
         await user.save();
 
-        console.log('✅ Reward applied:', { user: userEmail, rewardType, amount, txnId });
+        console.log('✅ Reward applied:', { user: userEmail, rewardType, amount, txnId, dailyCount: user.dailyAdCount });
 
         return res.status(200).json({
             success: true,
             rewardApplied: true,
             transactionId: txnId,
             rewardType,
-            amount
+            amount,
+            adsWatchedToday: user.dailyAdCount,
+            adsRemaining: MAX_DAILY_ADS - user.dailyAdCount
         });
 
     } catch (error) {
@@ -461,7 +479,9 @@ app.post('/api/admob/verify-reward', async (req, res) => {
                 currentBalance: {
                     credits: user.credits,
                     realMoney: user.realMoneyBalance
-                }
+                },
+                adsWatchedToday: user.dailyAdCount || 0,
+                adsRemaining: MAX_DAILY_ADS - (user.dailyAdCount || 0)
             });
         } else {
             return res.status(200).json({
@@ -496,6 +516,8 @@ app.get('/api/admob/history/:email', async (req, res) => {
             success: true,
             totalAdsWatched: user.totalAdsWatched || 0,
             todayAdsWatched: user.dailyAdCount || 0,
+            dailyLimit: MAX_DAILY_ADS,
+            adsRemaining: MAX_DAILY_ADS - (user.dailyAdCount || 0),
             recentTransactions: (user.adRewardTransactions || []).slice(-20).reverse()
         });
 
@@ -1100,4 +1122,5 @@ app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`🤖 AI: ${GROQ_API_KEY ? 'Configured' : 'NOT CONFIGURED'}`);
     console.log(`📺 AdMob callback: /api/admob/reward-callback`);
+    console.log(`📺 Daily ad limit: ${MAX_DAILY_ADS} ads per user`);
 });
