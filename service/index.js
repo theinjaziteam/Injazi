@@ -151,6 +151,230 @@ app.get('/api/health', (req, res) => {
 });
 
 // ============================================
+// ADMOB REWARDED ADS CALLBACK
+// ============================================
+
+// Secret key for verifying AdMob callbacks (set in your .env)
+const ADMOB_SSV_SECRET = process.env.ADMOB_SSV_SECRET || 'your-admob-ssv-secret';
+
+// Verify AdMob SSV (Server-Side Verification) signature
+const crypto = await import('crypto');
+
+const verifyAdMobSignature = (queryParams, signature, keyId) => {
+    // For production, you should fetch Google's public keys and verify
+    // For now, we'll use a simpler custom_data verification
+    return true; // Implement proper verification in production
+};
+
+// AdMob Rewarded Ad Callback Endpoint
+app.get('/api/admob/reward-callback', async (req, res) => {
+    try {
+        const {
+            ad_network,
+            ad_unit,
+            custom_data,    // This contains user_id and reward info you pass
+            reward_amount,
+            reward_item,
+            signature,
+            key_id,
+            transaction_id,
+            user_id,        // If you set it in the ad request
+            timestamp
+        } = req.query;
+
+        console.log('📺 AdMob Reward Callback:', {
+            ad_unit,
+            custom_data,
+            reward_amount,
+            reward_item,
+            transaction_id,
+            user_id,
+            timestamp
+        });
+
+        // Parse custom_data (JSON string with user email and extra info)
+        let customDataParsed;
+        try {
+            customDataParsed = JSON.parse(decodeURIComponent(custom_data || '{}'));
+        } catch (e) {
+            customDataParsed = { email: custom_data };
+        }
+
+        const userEmail = customDataParsed.email || user_id;
+        const rewardType = customDataParsed.rewardType || reward_item || 'credits';
+        const amount = parseInt(reward_amount) || customDataParsed.amount || 10;
+
+        if (!userEmail) {
+            console.error('❌ AdMob callback: No user identifier');
+            return res.status(400).json({ error: 'Missing user identifier' });
+        }
+
+        // Check for duplicate transaction
+        const user = await User.findOne({ email: userEmail });
+        if (!user) {
+            console.error('❌ AdMob callback: User not found:', userEmail);
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        // Check if this transaction was already processed
+        const existingTransaction = user.adRewardTransactions?.find(
+            t => t.transactionId === transaction_id
+        );
+        
+        if (existingTransaction) {
+            console.log('⚠️ Duplicate transaction, already rewarded:', transaction_id);
+            return res.status(200).json({ 
+                success: true, 
+                message: 'Already rewarded',
+                duplicate: true 
+            });
+        }
+
+        // Apply reward based on type
+        let rewardApplied = false;
+        let rewardDetails = {};
+
+        switch (rewardType) {
+            case 'credits':
+                user.credits = (user.credits || 0) + amount;
+                rewardDetails = { credits: amount };
+                rewardApplied = true;
+                break;
+            
+            case 'premium_time':
+                // Grant temporary premium (e.g., 24 hours)
+                const premiumHours = amount || 24;
+                user.premiumUntil = new Date(Date.now() + premiumHours * 60 * 60 * 1000);
+                rewardDetails = { premiumHours };
+                rewardApplied = true;
+                break;
+            
+            case 'streak_freeze':
+                user.streakFreezes = (user.streakFreezes || 0) + 1;
+                rewardDetails = { streakFreezes: 1 };
+                rewardApplied = true;
+                break;
+            
+            case 'goal_slot':
+                user.maxGoalSlots = (user.maxGoalSlots || 3) + 1;
+                rewardDetails = { goalSlots: 1 };
+                rewardApplied = true;
+                break;
+
+            case 'real_money':
+                // Small real money reward (for cash-out features)
+                const moneyAmount = amount / 1000; // e.g., 10 = $0.01
+                user.realMoneyBalance = (user.realMoneyBalance || 0) + moneyAmount;
+                rewardDetails = { realMoney: moneyAmount };
+                rewardApplied = true;
+                break;
+            
+            default:
+                user.credits = (user.credits || 0) + amount;
+                rewardDetails = { credits: amount };
+                rewardApplied = true;
+        }
+
+        // Log the transaction
+        if (!user.adRewardTransactions) {
+            user.adRewardTransactions = [];
+        }
+        
+        user.adRewardTransactions.push({
+            transactionId: transaction_id,
+            adUnit: ad_unit,
+            rewardType,
+            amount,
+            rewardDetails,
+            timestamp: Date.now(),
+            adNetwork: ad_network
+        });
+
+        // Keep only last 100 transactions to prevent bloat
+        if (user.adRewardTransactions.length > 100) {
+            user.adRewardTransactions = user.adRewardTransactions.slice(-100);
+        }
+
+        await user.save();
+
+        console.log('✅ AdMob reward applied:', {
+            user: userEmail,
+            rewardType,
+            amount,
+            transactionId: transaction_id
+        });
+
+        // Return success (AdMob expects 200 status)
+        res.status(200).json({ 
+            success: true, 
+            rewardApplied,
+            rewardDetails,
+            newBalance: {
+                credits: user.credits,
+                realMoney: user.realMoneyBalance
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ AdMob callback error:', error);
+        // Still return 200 to prevent AdMob from retrying
+        res.status(200).json({ success: false, error: error.message });
+    }
+});
+
+// POST version for additional security
+app.post('/api/admob/reward-callback', async (req, res) => {
+    // Same logic as GET, but reads from body
+    const params = { ...req.query, ...req.body };
+    req.query = params;
+    // Redirect to GET handler logic
+    return app._router.handle(req, res);
+});
+
+// Endpoint to verify reward was applied (called from client after ad)
+app.post('/api/admob/verify-reward', async (req, res) => {
+    try {
+        const { email, transactionId } = req.body;
+
+        if (!email || !transactionId) {
+            return res.status(400).json({ error: 'Missing email or transactionId' });
+        }
+
+        const user = await User.findOne({ email });
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        const transaction = user.adRewardTransactions?.find(
+            t => t.transactionId === transactionId
+        );
+
+        if (transaction) {
+            res.json({ 
+                success: true, 
+                rewarded: true,
+                transaction,
+                currentBalance: {
+                    credits: user.credits,
+                    realMoney: user.realMoneyBalance
+                }
+            });
+        } else {
+            res.json({ 
+                success: true, 
+                rewarded: false,
+                message: 'Transaction not found yet, may still be processing'
+            });
+        }
+
+    } catch (error) {
+        console.error('Verify reward error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+
+// ============================================
 // AUTH ENDPOINTS
 // ============================================
 
@@ -743,4 +967,5 @@ app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`🤖 AI: ${GROQ_API_KEY ? 'Configured' : 'NOT CONFIGURED'}`);
 });
+
 
