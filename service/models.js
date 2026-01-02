@@ -621,3 +621,34 @@ UserSchema.methods.canWatchMoreAds = function(maxDaily = 10) {
 
 // ========== EXPORT ==========
 export const User = mongoose.model('User', UserSchema);
+
+// ========== CONNECTED OAUTH ACCOUNTS ==========
+connectedAccounts: [{
+    platform: {
+        type: String,
+        required: true,
+        enum: [
+            'shopify', 'klaviyo', 'mailchimp', 'tiktok', 'meta', 'google', 
+            'youtube', 'twitter', 'pinterest', 'linkedin', 'spotify',
+            'notion', 'slack', 'discord', 'stripe', 'paypal', 'github',
+            'trello', 'asana', 'todoist', 'fitbit', 'strava', 'withings',
+            'oura', 'whoop', 'google_fit', 'amazon', 'dropbox', 'zoom',
+            'calendly', 'hubspot', 'salesforce', 'quickbooks', 'xero',
+            'wave', 'coinbase', 'etrade'
+        ]
+    },
+    platformUserId: String,
+    platformUsername: String,
+    platformEmail: String,
+    accessToken: { type: String, select: false }, // Hidden by default
+    refreshToken: { type: String, select: false },
+    expiresAt: Number,
+    tokenType: { type: String, default: 'Bearer' },
+    scope: String,
+    isConnected: { type: Boolean, default: true },
+    connectedAt: { type: Number, default: Date.now },
+    lastRefreshedAt: Number,
+    lastUsedAt: Number,
+    metadata: mongoose.Schema.Types.Mixed
+}],
+
