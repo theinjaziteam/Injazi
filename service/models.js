@@ -96,7 +96,7 @@ const AdgemTransactionSchema = new mongoose.Schema({
 });
 
 // ============================================
-// ADMOB REWARD TRANSACTION SCHEMA (NEW)
+// ADMOB REWARD TRANSACTION SCHEMA
 // ============================================
 const AdMobRewardTransactionSchema = new mongoose.Schema({
     transactionId: { type: String, required: true, index: true },
@@ -179,7 +179,7 @@ const GuideConversationSchema = new mongoose.Schema({
 });
 
 // ============================================
-// CONNECTED APP SCHEMA
+// CONNECTED APP SCHEMA (Legacy - for metrics tracking)
 // ============================================
 const LiveMetricSchema = new mongoose.Schema({
     id: String,
@@ -203,6 +203,68 @@ const ConnectedAppSchema = new mongoose.Schema({
     refreshToken: String,
     tokenExpiry: Number,
     lastSync: Number
+});
+
+// ============================================
+// CONNECTED OAUTH ACCOUNT SCHEMA (NEW - for OAuth integrations)
+// ============================================
+const ConnectedOAuthAccountSchema = new mongoose.Schema({
+    platform: {
+        type: String,
+        required: true,
+        enum: [
+            // E-commerce
+            'shopify', 'woocommerce', 'bigcommerce', 'etsy', 'amazon_seller',
+            // Email Marketing
+            'klaviyo', 'mailchimp', 'sendgrid', 'constant_contact', 'convertkit',
+            // Social Media
+            'tiktok', 'meta', 'instagram', 'facebook', 'twitter', 'pinterest', 'linkedin', 'youtube', 'snapchat', 'reddit',
+            // Productivity
+            'notion', 'slack', 'discord', 'trello', 'asana', 'todoist', 'monday', 'clickup', 'airtable',
+            // Google Services
+            'google', 'google_analytics', 'google_ads', 'google_fit', 'google_calendar', 'gmail',
+            // Fitness & Health
+            'fitbit', 'strava', 'withings', 'oura', 'whoop', 'garmin', 'myfitnesspal', 'peloton',
+            // Finance & Payments
+            'stripe', 'paypal', 'square', 'quickbooks', 'xero', 'wave', 'freshbooks', 'plaid',
+            // Investment
+            'coinbase', 'robinhood', 'etrade', 'fidelity', 'schwab',
+            // CRM & Sales
+            'hubspot', 'salesforce', 'pipedrive', 'zoho', 'intercom', 'zendesk',
+            // Cloud Storage
+            'dropbox', 'google_drive', 'onedrive', 'box',
+            // Communication
+            'zoom', 'calendly', 'microsoft_teams', 'webex',
+            // Development
+            'github', 'gitlab', 'bitbucket', 'jira', 'linear',
+            // Music & Media
+            'spotify', 'apple_music', 'twitch',
+            // Other
+            'amazon', 'ebay', 'walmart', 'aliexpress', 'zapier', 'make', 'ifttt'
+        ]
+    },
+    platformUserId: String,
+    platformUsername: String,
+    platformEmail: String,
+    platformAvatar: String,
+    accessToken: { type: String, select: false },
+    refreshToken: { type: String, select: false },
+    expiresAt: Number,
+    tokenType: { type: String, default: 'Bearer' },
+    scope: String,
+    isConnected: { type: Boolean, default: true },
+    connectedAt: { type: Number, default: Date.now },
+    lastRefreshedAt: Number,
+    lastUsedAt: Number,
+    lastSyncAt: Number,
+    syncEnabled: { type: Boolean, default: true },
+    permissions: [String],
+    metadata: mongoose.Schema.Types.Mixed,
+    settings: {
+        autoSync: { type: Boolean, default: true },
+        syncFrequency: { type: String, enum: ['realtime', 'hourly', 'daily', 'weekly'], default: 'daily' },
+        notifications: { type: Boolean, default: true }
+    }
 });
 
 // ============================================
@@ -476,8 +538,11 @@ const UserSchema = new mongoose.Schema({
     chatHistory: [ChatMessageSchema],
     guideConversations: [GuideConversationSchema],
     
-    // ========== CONNECTED APPS ==========
+    // ========== CONNECTED APPS (Legacy) ==========
     connectedApps: [ConnectedAppSchema],
+    
+    // ========== CONNECTED OAUTH ACCOUNTS (NEW) ==========
+    connectedAccounts: [ConnectedOAuthAccountSchema],
     
     // ========== NOTIFICATIONS & ALERTS ==========
     agentAlerts: [AgentAlertSchema],
@@ -543,8 +608,8 @@ const UserSchema = new mongoose.Schema({
     // ========== CONTENT DRAFTS (Social Media Agent) ==========
     contentDrafts: [{
         id: String,
-        platform: { type: String, enum: ['tiktok', 'instagram', 'facebook', 'youtube'] },
-        type: { type: String, enum: ['post', 'reel', 'story', 'video'] },
+        platform: { type: String, enum: ['tiktok', 'instagram', 'facebook', 'youtube', 'twitter', 'pinterest', 'linkedin'] },
+        contentType: { type: String, enum: ['post', 'reel', 'story', 'video', 'short', 'tweet', 'pin'] },
         caption: String,
         hashtags: [String],
         mediaUrls: [String],
@@ -556,26 +621,47 @@ const UserSchema = new mongoose.Schema({
             views: Number,
             likes: Number,
             comments: Number,
-            shares: Number
+            shares: Number,
+            clicks: Number,
+            engagement: Number
         }
     }],
     
     // ========== EMAIL CAMPAIGNS (Email Agent) ==========
     emailCampaigns: [{
         id: String,
-        type: { type: String, enum: ['welcome', 'abandoned_cart', 'promo', 'newsletter', 'custom'] },
+        campaignType: { type: String, enum: ['welcome', 'abandoned_cart', 'promo', 'newsletter', 'custom', 'win_back', 'product_launch'] },
         subject: String,
+        preheader: String,
         content: String,
+        htmlContent: String,
         segment: String,
-        status: { type: String, enum: ['draft', 'pending_approval', 'scheduled', 'sent', 'failed'], default: 'draft' },
+        segmentSize: Number,
+        status: { type: String, enum: ['draft', 'pending_approval', 'scheduled', 'sending', 'sent', 'failed'], default: 'draft' },
         scheduledFor: Number,
         sentAt: Number,
+        createdAt: { type: Number, default: Date.now },
         stats: {
             sent: Number,
+            delivered: Number,
             opened: Number,
             clicked: Number,
-            unsubscribed: Number
+            unsubscribed: Number,
+            bounced: Number,
+            revenue: Number
         }
+    }],
+    
+    // ========== WEBHOOK SUBSCRIPTIONS ==========
+    webhookSubscriptions: [{
+        id: String,
+        platform: String,
+        eventType: String,
+        webhookUrl: String,
+        secret: String,
+        isActive: { type: Boolean, default: true },
+        createdAt: { type: Number, default: Date.now },
+        lastTriggeredAt: Number
     }]
     
 }, {
@@ -587,6 +673,7 @@ const UserSchema = new mongoose.Schema({
 UserSchema.index({ email: 1 });
 UserSchema.index({ referralCode: 1 });
 UserSchema.index({ 'adRewardTransactions.transactionId': 1 });
+UserSchema.index({ 'connectedAccounts.platform': 1 });
 UserSchema.index({ createdAt: -1 });
 
 // ========== METHODS ==========
@@ -619,36 +706,18 @@ UserSchema.methods.canWatchMoreAds = function(maxDaily = 10) {
     return this.hasWatchedAdToday() < maxDaily;
 };
 
+// Method to get connected account by platform
+UserSchema.methods.getConnectedAccount = function(platform) {
+    return this.connectedAccounts?.find(acc => acc.platform === platform && acc.isConnected);
+};
+
+// Method to check if platform is connected
+UserSchema.methods.isPlatformConnected = function(platform) {
+    const account = this.getConnectedAccount(platform);
+    if (!account) return false;
+    if (account.expiresAt && Date.now() > account.expiresAt) return false;
+    return true;
+};
+
 // ========== EXPORT ==========
 export const User = mongoose.model('User', UserSchema);
-
-// ========== CONNECTED OAUTH ACCOUNTS ==========
-connectedAccounts: [{
-    platform: {
-        type: String,
-        required: true,
-        enum: [
-            'shopify', 'klaviyo', 'mailchimp', 'tiktok', 'meta', 'google', 
-            'youtube', 'twitter', 'pinterest', 'linkedin', 'spotify',
-            'notion', 'slack', 'discord', 'stripe', 'paypal', 'github',
-            'trello', 'asana', 'todoist', 'fitbit', 'strava', 'withings',
-            'oura', 'whoop', 'google_fit', 'amazon', 'dropbox', 'zoom',
-            'calendly', 'hubspot', 'salesforce', 'quickbooks', 'xero',
-            'wave', 'coinbase', 'etrade'
-        ]
-    },
-    platformUserId: String,
-    platformUsername: String,
-    platformEmail: String,
-    accessToken: { type: String, select: false }, // Hidden by default
-    refreshToken: { type: String, select: false },
-    expiresAt: Number,
-    tokenType: { type: String, default: 'Bearer' },
-    scope: String,
-    isConnected: { type: Boolean, default: true },
-    connectedAt: { type: Number, default: Date.now },
-    lastRefreshedAt: Number,
-    lastUsedAt: Number,
-    metadata: mongoose.Schema.Types.Mixed
-}],
-
