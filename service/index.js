@@ -1,3 +1,4 @@
+// service/index.js
 import express from 'express';
 import cors from 'cors';
 import mongoose from 'mongoose';
@@ -5,6 +6,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
 import { User } from './models.js';
+import oauthRoutes from './oauthRoutes.js';
 
 dotenv.config();
 
@@ -16,11 +18,12 @@ const MONGODB_URI = process.env.MONGODB_URI;
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_MODEL = 'llama-3.3-70b-versatile';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://injazi.vercel.app';
 
 // ============================================
 // ADMOB CONFIGURATION
 // ============================================
-const MAX_DAILY_ADS = 25; // Maximum ads per user per day
+const MAX_DAILY_ADS = 25;
 
 // ============================================
 // RATE LIMITING
@@ -73,7 +76,7 @@ const rateLimiter = (endpoint) => {
     };
 };
 
-// Cleanup old entries
+// Cleanup old rate limit entries
 setInterval(() => {
     const now = Date.now();
     for (const [key, entry] of rateLimits.entries()) {
@@ -108,7 +111,7 @@ app.use(cors({
         if (allowedOrigins.some(allowed => origin.startsWith(allowed.replace(/\/$/, '')))) {
             return callback(null, true);
         }
-        callback(null, true); // Allow all for AdMob callbacks
+        callback(null, true);
     },
     credentials: true
 }));
@@ -143,22 +146,28 @@ const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 // ============================================
 
 app.get('/', (req, res) => {
-    res.json({ status: 'ok', message: 'InJazi API Running' });
+    res.json({ status: 'ok', message: 'InJazi API Running', version: '2.0.0' });
 });
 
 app.get('/api/health', (req, res) => {
     res.json({ 
         status: 'ok', 
         db: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-        ai: GROQ_API_KEY ? 'configured' : 'not configured'
+        ai: GROQ_API_KEY ? 'configured' : 'not configured',
+        oauth: 'enabled'
     });
 });
 
 // ============================================
-// ADMOB REWARDED ADS CALLBACKS - MUST BE BEFORE OTHER ROUTES
+// OAUTH ROUTES
 // ============================================
 
-// Health check for AdMob
+app.use('/api/oauth', oauthRoutes);
+
+// ============================================
+// ADMOB REWARDED ADS CALLBACKS
+// ============================================
+
 app.get('/api/admob/health', (req, res) => {
     res.status(200).json({
         success: true,
@@ -169,7 +178,6 @@ app.get('/api/admob/health', (req, res) => {
     });
 });
 
-// Check if user can watch more ads today
 app.get('/api/admob/can-watch', async (req, res) => {
     try {
         const { email } = req.query;
@@ -205,7 +213,6 @@ app.get('/api/admob/can-watch', async (req, res) => {
     }
 });
 
-// Main AdMob SSV Callback Endpoint - GET
 app.get('/api/admob/reward-callback', async (req, res) => {
     console.log('📺 AdMob GET Callback received:', JSON.stringify(req.query));
     
@@ -219,16 +226,9 @@ app.get('/api/admob/reward-callback', async (req, res) => {
             signature,
             key_id,
             transaction_id,
-            user_id,
-            timestamp
+            user_id
         } = req.query;
 
-        // ============================================
-        // HANDLE ADMOB VERIFICATION TEST
-        // Always return 200 OK for verification requests
-        // ============================================
-        
-        // Empty request = verification ping
         if (Object.keys(req.query).length === 0) {
             console.log('✅ AdMob empty verification ping');
             return res.status(200).json({ 
@@ -238,7 +238,6 @@ app.get('/api/admob/reward-callback', async (req, res) => {
             });
         }
 
-        // Signature-only request = verification
         if (signature && key_id && !custom_data && !user_id && !transaction_id) {
             console.log('✅ AdMob signature verification request');
             return res.status(200).json({ 
@@ -248,7 +247,6 @@ app.get('/api/admob/reward-callback', async (req, res) => {
             });
         }
 
-        // Minimal request without user data = verification
         if (!custom_data && !user_id) {
             console.log('✅ AdMob verification (no user data)');
             return res.status(200).json({ 
@@ -258,11 +256,6 @@ app.get('/api/admob/reward-callback', async (req, res) => {
             });
         }
 
-        // ============================================
-        // PROCESS ACTUAL REWARD CALLBACK
-        // ============================================
-
-        // Parse custom_data
         let customDataParsed = {};
         try {
             if (custom_data) {
@@ -276,14 +269,12 @@ app.get('/api/admob/reward-callback', async (req, res) => {
             }
         }
 
-        // Get user email
         const userEmail = (
             customDataParsed.email || 
             user_id || 
             ''
         ).toLowerCase().trim();
 
-        // No user = still return 200
         if (!userEmail) {
             console.log('⚠️ No user identifier provided');
             return res.status(200).json({ 
@@ -297,7 +288,6 @@ app.get('/api/admob/reward-callback', async (req, res) => {
         const amount = parseInt(reward_amount) || customDataParsed.amount || 10;
         const txnId = transaction_id || customDataParsed.transactionId || `auto_${Date.now()}`;
 
-        // Find user
         const user = await User.findOne({ email: userEmail });
         if (!user) {
             console.log('⚠️ User not found:', userEmail);
@@ -308,11 +298,9 @@ app.get('/api/admob/reward-callback', async (req, res) => {
             });
         }
 
-        // Initialize arrays
         if (!user.adRewardTransactions) user.adRewardTransactions = [];
         if (!user.earnings) user.earnings = [];
 
-        // Check duplicate
         const existingTxn = user.adRewardTransactions.find(t => t.transactionId === txnId);
         if (existingTxn) {
             console.log('⚠️ Duplicate transaction:', txnId);
@@ -323,7 +311,6 @@ app.get('/api/admob/reward-callback', async (req, res) => {
             });
         }
 
-        // Check daily limit
         const today = new Date().setHours(0, 0, 0, 0);
         if (!user.dailyAdCountResetAt || user.dailyAdCountResetAt < today) {
             user.dailyAdCount = 0;
@@ -340,7 +327,6 @@ app.get('/api/admob/reward-callback', async (req, res) => {
             });
         }
 
-        // Apply reward
         let rewardDetails = {};
         
         switch (rewardType) {
@@ -372,7 +358,6 @@ app.get('/api/admob/reward-callback', async (req, res) => {
                 rewardDetails = { credits: amount };
         }
 
-        // Log transaction
         user.adRewardTransactions.push({
             transactionId: txnId,
             adUnit: ad_unit || 'unknown',
@@ -384,12 +369,10 @@ app.get('/api/admob/reward-callback', async (req, res) => {
             status: 'completed'
         });
 
-        // Update counts
         user.totalAdsWatched = (user.totalAdsWatched || 0) + 1;
         user.lastAdWatchedAt = Date.now();
         user.dailyAdCount = (user.dailyAdCount || 0) + 1;
 
-        // Trim old transactions
         if (user.adRewardTransactions.length > 100) {
             user.adRewardTransactions = user.adRewardTransactions.slice(-100);
         }
@@ -410,7 +393,6 @@ app.get('/api/admob/reward-callback', async (req, res) => {
 
     } catch (error) {
         console.error('❌ AdMob callback error:', error);
-        // ALWAYS return 200
         return res.status(200).json({ 
             success: false, 
             error: error.message,
@@ -419,16 +401,13 @@ app.get('/api/admob/reward-callback', async (req, res) => {
     }
 });
 
-// Main AdMob SSV Callback Endpoint - POST
 app.post('/api/admob/reward-callback', async (req, res) => {
     console.log('📺 AdMob POST Callback received');
     console.log('Query:', req.query);
     console.log('Body:', req.body);
     
-    // Merge query and body
     const params = { ...req.query, ...req.body };
     
-    // Handle empty/verification requests
     if (Object.keys(params).length === 0) {
         return res.status(200).json({ 
             success: true, 
@@ -437,7 +416,6 @@ app.post('/api/admob/reward-callback', async (req, res) => {
         });
     }
     
-    // For requests with data, process similarly to GET
     return res.status(200).json({ 
         success: true, 
         message: 'POST callback received',
@@ -445,7 +423,6 @@ app.post('/api/admob/reward-callback', async (req, res) => {
     });
 });
 
-// Verify reward endpoint
 app.post('/api/admob/verify-reward', async (req, res) => {
     try {
         const { email, transactionId } = req.body;
@@ -501,7 +478,6 @@ app.post('/api/admob/verify-reward', async (req, res) => {
     }
 });
 
-// Ad history endpoint
 app.get('/api/admob/history/:email', async (req, res) => {
     try {
         const user = await User.findOne({ email: req.params.email.toLowerCase() });
@@ -625,6 +601,9 @@ app.post('/api/auth/login', async (req, res) => {
         if (!isMatch) {
             return res.status(400).json({ message: 'Invalid credentials.' });
         }
+
+        user.lastLoginAt = Date.now();
+        await user.save();
 
         const token = generateToken(user._id);
         const userObj = user.toObject();
@@ -804,6 +783,7 @@ app.post('/api/sync', async (req, res) => {
         delete updateData._id;
         delete updateData.password;
         delete updateData.__v;
+        delete updateData.connectedAccounts; // Don't overwrite OAuth data from sync
 
         await User.findOneAndUpdate({ email: userData.email }, updateData, { upsert: false, new: true });
         res.json({ success: true });
@@ -818,6 +798,22 @@ app.get('/api/user/:email', async (req, res) => {
         if (!user) return res.status(404).json({ message: 'User not found' });
         const userObj = user.toObject();
         delete userObj.password;
+        
+        // Sanitize connected accounts (remove tokens)
+        if (userObj.connectedAccounts) {
+            userObj.connectedAccounts = userObj.connectedAccounts.map(acc => ({
+                platform: acc.platform,
+                platformUsername: acc.platformUsername,
+                platformEmail: acc.platformEmail,
+                platformAvatar: acc.platformAvatar,
+                isConnected: acc.isConnected,
+                connectedAt: acc.connectedAt,
+                lastSyncAt: acc.lastSyncAt,
+                expiresAt: acc.expiresAt,
+                isExpired: acc.expiresAt ? Date.now() > acc.expiresAt : false
+            }));
+        }
+        
         res.json(userObj);
     } catch (error) {
         res.status(500).json({ message: error.message });
@@ -1121,6 +1117,7 @@ setInterval(() => {
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`🤖 AI: ${GROQ_API_KEY ? 'Configured' : 'NOT CONFIGURED'}`);
+    console.log(`🔐 OAuth: Enabled at /api/oauth`);
     console.log(`📺 AdMob callback: /api/admob/reward-callback`);
     console.log(`📺 Daily ad limit: ${MAX_DAILY_ADS} ads per user`);
 });
