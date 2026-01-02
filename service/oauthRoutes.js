@@ -4,23 +4,27 @@ import { User } from './models.js';
 
 const router = express.Router();
 
+// IMPORTANT: These must match your deployment URLs
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://injazi.vercel.app';
 const BACKEND_URL = process.env.BACKEND_URL || 'https://injazi-backend.onrender.com';
+
+console.log('🔧 OAuth URLs configured:');
+console.log('   Frontend:', FRONTEND_URL);
+console.log('   Backend:', BACKEND_URL);
 
 // ============================================
 // OAUTH CONFIGURATIONS (40+ Platforms)
 // ============================================
 
 const OAUTH_CONFIGS = {
-    // E-COMMERCE
+    // E-COMMERCE - Shopify requires special handling (store-specific URL)
     shopify: {
         name: 'Shopify',
         category: 'ecommerce',
         icon: '🛒',
         description: 'E-commerce platform',
-        authUrl: 'https://accounts.shopify.com/oauth/authorize',
-        tokenUrl: 'https://accounts.shopify.com/oauth/token',
-        scopes: 'read_products write_products read_orders write_orders read_customers read_analytics',
+        type: 'shopify', // Special type - requires shop domain
+        scopes: 'read_products,write_products,read_orders,write_orders,read_customers,read_analytics',
         getClientId: () => process.env.SHOPIFY_CLIENT_ID,
         getClientSecret: () => process.env.SHOPIFY_CLIENT_SECRET
     },
@@ -31,7 +35,7 @@ const OAUTH_CONFIGS = {
         category: 'marketing',
         icon: '📧',
         description: 'Email marketing & SMS',
-        type: 'api_key', // Uses API key, not OAuth
+        type: 'api_key',
         getApiKey: () => process.env.KLAVIYO_API_KEY,
         getPublicKey: () => process.env.KLAVIYO_PUBLIC_KEY
     },
@@ -55,7 +59,7 @@ const OAUTH_CONFIGS = {
         description: 'Short-form video',
         authUrl: 'https://www.tiktok.com/v2/auth/authorize/',
         tokenUrl: 'https://open.tiktokapis.com/v2/oauth/token/',
-        scopes: 'user.info.basic,video.list,video.upload,video.publish',
+        scopes: 'user.info.basic,video.list',
         getClientId: () => process.env.TIKTOK_CLIENT_KEY,
         getClientSecret: () => process.env.TIKTOK_CLIENT_SECRET
     },
@@ -66,7 +70,7 @@ const OAUTH_CONFIGS = {
         description: 'Facebook & Instagram',
         authUrl: 'https://www.facebook.com/v18.0/dialog/oauth',
         tokenUrl: 'https://graph.facebook.com/v18.0/oauth/access_token',
-        scopes: 'email,public_profile,pages_show_list,instagram_basic,instagram_content_publish',
+        scopes: 'email,public_profile,pages_show_list,instagram_basic',
         getClientId: () => process.env.META_APP_ID,
         getClientSecret: () => process.env.META_APP_SECRET
     },
@@ -88,7 +92,7 @@ const OAUTH_CONFIGS = {
         description: 'Visual discovery',
         authUrl: 'https://www.pinterest.com/oauth/',
         tokenUrl: 'https://api.pinterest.com/v5/oauth/token',
-        scopes: 'boards:read boards:write pins:read pins:write user_accounts:read',
+        scopes: 'boards:read,pins:read,user_accounts:read',
         getClientId: () => process.env.PINTEREST_APP_ID,
         getClientSecret: () => process.env.PINTEREST_APP_SECRET
     },
@@ -99,7 +103,7 @@ const OAUTH_CONFIGS = {
         description: 'Professional network',
         authUrl: 'https://www.linkedin.com/oauth/v2/authorization',
         tokenUrl: 'https://www.linkedin.com/oauth/v2/accessToken',
-        scopes: 'r_liteprofile r_emailaddress w_member_social',
+        scopes: 'openid profile email',
         getClientId: () => process.env.LINKEDIN_CLIENT_ID,
         getClientSecret: () => process.env.LINKEDIN_CLIENT_SECRET
     },
@@ -112,18 +116,7 @@ const OAUTH_CONFIGS = {
         description: 'YouTube, Analytics, Ads',
         authUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
         tokenUrl: 'https://oauth2.googleapis.com/token',
-        scopes: 'https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/analytics.readonly https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile',
-        getClientId: () => process.env.GOOGLE_CLIENT_ID,
-        getClientSecret: () => process.env.GOOGLE_CLIENT_SECRET
-    },
-    google_fit: {
-        name: 'Google Fit',
-        category: 'health',
-        icon: '❤️',
-        description: 'Fitness tracking',
-        authUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
-        tokenUrl: 'https://oauth2.googleapis.com/token',
-        scopes: 'https://www.googleapis.com/auth/fitness.activity.read https://www.googleapis.com/auth/fitness.body.read https://www.googleapis.com/auth/fitness.heart_rate.read',
+        scopes: 'https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile',
         getClientId: () => process.env.GOOGLE_CLIENT_ID,
         getClientSecret: () => process.env.GOOGLE_CLIENT_SECRET
     },
@@ -136,7 +129,7 @@ const OAUTH_CONFIGS = {
         description: 'Music streaming',
         authUrl: 'https://accounts.spotify.com/authorize',
         tokenUrl: 'https://accounts.spotify.com/api/token',
-        scopes: 'user-read-private user-read-email user-top-read user-read-recently-played',
+        scopes: 'user-read-private user-read-email user-top-read',
         getClientId: () => process.env.SPOTIFY_CLIENT_ID,
         getClientSecret: () => process.env.SPOTIFY_CLIENT_SECRET
     },
@@ -160,7 +153,7 @@ const OAUTH_CONFIGS = {
         description: 'Team communication',
         authUrl: 'https://slack.com/oauth/v2/authorize',
         tokenUrl: 'https://slack.com/api/oauth.v2.access',
-        scopes: 'channels:read chat:write users:read',
+        scopes: 'channels:read,chat:write,users:read',
         getClientId: () => process.env.SLACK_CLIENT_ID,
         getClientSecret: () => process.env.SLACK_CLIENT_SECRET
     },
@@ -171,20 +164,9 @@ const OAUTH_CONFIGS = {
         description: 'Community chat',
         authUrl: 'https://discord.com/api/oauth2/authorize',
         tokenUrl: 'https://discord.com/api/oauth2/token',
-        scopes: 'identify email guilds',
+        scopes: 'identify email',
         getClientId: () => process.env.DISCORD_CLIENT_ID,
         getClientSecret: () => process.env.DISCORD_CLIENT_SECRET
-    },
-    trello: {
-        name: 'Trello',
-        category: 'productivity',
-        icon: '📋',
-        description: 'Project boards',
-        authUrl: 'https://trello.com/1/authorize',
-        tokenUrl: null,
-        scopes: 'read,write',
-        getClientId: () => process.env.TRELLO_API_KEY,
-        getClientSecret: () => process.env.TRELLO_API_SECRET
     },
     asana: {
         name: 'Asana',
@@ -217,7 +199,7 @@ const OAUTH_CONFIGS = {
         description: 'Code repository',
         authUrl: 'https://github.com/login/oauth/authorize',
         tokenUrl: 'https://github.com/login/oauth/access_token',
-        scopes: 'user repo',
+        scopes: 'user:email read:user',
         getClientId: () => process.env.GITHUB_CLIENT_ID,
         getClientSecret: () => process.env.GITHUB_CLIENT_SECRET
     },
@@ -230,7 +212,7 @@ const OAUTH_CONFIGS = {
         description: 'Fitness tracking',
         authUrl: 'https://www.fitbit.com/oauth2/authorize',
         tokenUrl: 'https://api.fitbit.com/oauth2/token',
-        scopes: 'activity heartrate profile sleep weight',
+        scopes: 'activity heartrate profile',
         getClientId: () => process.env.FITBIT_CLIENT_ID,
         getClientSecret: () => process.env.FITBIT_CLIENT_SECRET
     },
@@ -241,42 +223,9 @@ const OAUTH_CONFIGS = {
         description: 'Activity tracking',
         authUrl: 'https://www.strava.com/oauth/authorize',
         tokenUrl: 'https://www.strava.com/oauth/token',
-        scopes: 'read,activity:read_all,profile:read_all',
+        scopes: 'read,activity:read',
         getClientId: () => process.env.STRAVA_CLIENT_ID,
         getClientSecret: () => process.env.STRAVA_CLIENT_SECRET
-    },
-    withings: {
-        name: 'Withings',
-        category: 'health',
-        icon: '⚖️',
-        description: 'Health devices',
-        authUrl: 'https://account.withings.com/oauth2_user/authorize2',
-        tokenUrl: 'https://wbsapi.withings.net/v2/oauth2',
-        scopes: 'user.info,user.metrics,user.activity',
-        getClientId: () => process.env.WITHINGS_CLIENT_ID,
-        getClientSecret: () => process.env.WITHINGS_CLIENT_SECRET
-    },
-    oura: {
-        name: 'Oura Ring',
-        category: 'health',
-        icon: '💍',
-        description: 'Sleep & recovery',
-        authUrl: 'https://cloud.ouraring.com/oauth/authorize',
-        tokenUrl: 'https://api.ouraring.com/oauth/token',
-        scopes: 'personal daily heartrate workout tag session',
-        getClientId: () => process.env.OURA_CLIENT_ID,
-        getClientSecret: () => process.env.OURA_CLIENT_SECRET
-    },
-    whoop: {
-        name: 'WHOOP',
-        category: 'health',
-        icon: '🏋️',
-        description: 'Performance tracking',
-        authUrl: 'https://api.prod.whoop.com/oauth/oauth2/auth',
-        tokenUrl: 'https://api.prod.whoop.com/oauth/oauth2/token',
-        scopes: 'read:profile read:recovery read:cycles read:workout read:sleep',
-        getClientId: () => process.env.WHOOP_CLIENT_ID,
-        getClientSecret: () => process.env.WHOOP_CLIENT_SECRET
     },
 
     // FINANCE & PAYMENTS
@@ -291,17 +240,6 @@ const OAUTH_CONFIGS = {
         getClientId: () => process.env.STRIPE_CLIENT_ID,
         getClientSecret: () => process.env.STRIPE_SECRET_KEY
     },
-    paypal: {
-        name: 'PayPal',
-        category: 'finance',
-        icon: '💰',
-        description: 'Payments',
-        authUrl: 'https://www.paypal.com/signin/authorize',
-        tokenUrl: 'https://api-m.paypal.com/v1/oauth2/token',
-        scopes: 'openid profile email',
-        getClientId: () => process.env.PAYPAL_CLIENT_ID,
-        getClientSecret: () => process.env.PAYPAL_CLIENT_SECRET
-    },
     quickbooks: {
         name: 'QuickBooks',
         category: 'finance',
@@ -313,28 +251,6 @@ const OAUTH_CONFIGS = {
         getClientId: () => process.env.QUICKBOOKS_CLIENT_ID,
         getClientSecret: () => process.env.QUICKBOOKS_CLIENT_SECRET
     },
-    xero: {
-        name: 'Xero',
-        category: 'finance',
-        icon: '📈',
-        description: 'Accounting',
-        authUrl: 'https://login.xero.com/identity/connect/authorize',
-        tokenUrl: 'https://identity.xero.com/connect/token',
-        scopes: 'openid profile email accounting.transactions accounting.contacts',
-        getClientId: () => process.env.XERO_CLIENT_ID,
-        getClientSecret: () => process.env.XERO_CLIENT_SECRET
-    },
-    coinbase: {
-        name: 'Coinbase',
-        category: 'finance',
-        icon: '₿',
-        description: 'Crypto',
-        authUrl: 'https://www.coinbase.com/oauth/authorize',
-        tokenUrl: 'https://api.coinbase.com/oauth/token',
-        scopes: 'wallet:accounts:read wallet:transactions:read',
-        getClientId: () => process.env.COINBASE_CLIENT_ID,
-        getClientSecret: () => process.env.COINBASE_CLIENT_SECRET
-    },
 
     // CRM & SALES
     hubspot: {
@@ -344,20 +260,9 @@ const OAUTH_CONFIGS = {
         description: 'CRM & Marketing',
         authUrl: 'https://app.hubspot.com/oauth/authorize',
         tokenUrl: 'https://api.hubapi.com/oauth/v1/token',
-        scopes: 'crm.objects.contacts.read crm.objects.contacts.write',
+        scopes: 'crm.objects.contacts.read',
         getClientId: () => process.env.HUBSPOT_CLIENT_ID,
         getClientSecret: () => process.env.HUBSPOT_CLIENT_SECRET
-    },
-    salesforce: {
-        name: 'Salesforce',
-        category: 'crm',
-        icon: '☁️',
-        description: 'CRM',
-        authUrl: 'https://login.salesforce.com/services/oauth2/authorize',
-        tokenUrl: 'https://login.salesforce.com/services/oauth2/token',
-        scopes: 'api refresh_token',
-        getClientId: () => process.env.SALESFORCE_CLIENT_ID,
-        getClientSecret: () => process.env.SALESFORCE_CLIENT_SECRET
     },
 
     // CLOUD & STORAGE
@@ -381,32 +286,30 @@ const OAUTH_CONFIGS = {
         description: 'Video meetings',
         authUrl: 'https://zoom.us/oauth/authorize',
         tokenUrl: 'https://zoom.us/oauth/token',
-        scopes: 'user:read meeting:read meeting:write',
+        scopes: 'user:read',
         getClientId: () => process.env.ZOOM_CLIENT_ID,
         getClientSecret: () => process.env.ZOOM_CLIENT_SECRET
-    },
-    calendly: {
-        name: 'Calendly',
-        category: 'communication',
-        icon: '📅',
-        description: 'Scheduling',
-        authUrl: 'https://auth.calendly.com/oauth/authorize',
-        tokenUrl: 'https://auth.calendly.com/oauth/token',
-        scopes: '',
-        getClientId: () => process.env.CALENDLY_CLIENT_ID,
-        getClientSecret: () => process.env.CALENDLY_CLIENT_SECRET
     }
+};
+
+// ============================================
+// HELPER: Get redirect URI for a platform
+// ============================================
+const getRedirectUri = (platform) => {
+    return `${BACKEND_URL}/api/oauth/${platform}/callback`;
 };
 
 // ============================================
 // GET AVAILABLE PLATFORMS
 // ============================================
-
 router.get('/platforms', (req, res) => {
     const platforms = Object.entries(OAUTH_CONFIGS)
         .filter(([_, config]) => {
             if (config.type === 'api_key') {
-                return config.getApiKey && config.getApiKey();
+                return true; // Always show API key platforms
+            }
+            if (config.type === 'shopify') {
+                return config.getClientId && config.getClientId();
             }
             return config.getClientId && config.getClientId();
         })
@@ -418,17 +321,16 @@ router.get('/platforms', (req, res) => {
             description: config.description || '',
             type: config.type || 'oauth',
             configured: config.type === 'api_key'
-                ? !!(config.getApiKey && config.getApiKey())
-                : !!(config.getClientId && config.getClientId() && config.getClientSecret && config.getClientSecret())
+                ? true
+                : !!(config.getClientId && config.getClientId())
         }));
     
     res.json({ success: true, platforms });
 });
 
 // ============================================
-// GET ALL PLATFORMS (including unconfigured)
+// GET ALL PLATFORMS
 // ============================================
-
 router.get('/platforms/all', (req, res) => {
     const platforms = Object.entries(OAUTH_CONFIGS).map(([id, config]) => ({
         id,
@@ -438,8 +340,8 @@ router.get('/platforms/all', (req, res) => {
         description: config.description || '',
         type: config.type || 'oauth',
         configured: config.type === 'api_key'
-            ? !!(config.getApiKey && config.getApiKey())
-            : !!(config.getClientId && config.getClientId() && config.getClientSecret && config.getClientSecret())
+            ? true
+            : !!(config.getClientId && config.getClientId())
     }));
     
     res.json({ success: true, platforms });
@@ -448,7 +350,6 @@ router.get('/platforms/all', (req, res) => {
 // ============================================
 // KLAVIYO API KEY CONNECTION
 // ============================================
-
 router.post('/klaviyo/connect', async (req, res) => {
     try {
         const { email, apiKey, publicKey } = req.body;
@@ -458,10 +359,9 @@ router.post('/klaviyo/connect', async (req, res) => {
         }
 
         const klaviyoApiKey = apiKey || process.env.KLAVIYO_API_KEY;
-        const klaviyoPublicKey = publicKey || process.env.KLAVIYO_PUBLIC_KEY;
 
         if (!klaviyoApiKey) {
-            return res.status(400).json({ error: 'Klaviyo API key not configured' });
+            return res.status(400).json({ error: 'Klaviyo API key required' });
         }
 
         // Verify the API key
@@ -494,7 +394,7 @@ router.post('/klaviyo/connect', async (req, res) => {
             platformUserId: accountData.data?.[0]?.id || null,
             platformUsername: accountData.data?.[0]?.attributes?.contact_information?.organization_name || 'Klaviyo Account',
             accessToken: klaviyoApiKey,
-            publicKey: klaviyoPublicKey,
+            publicKey: publicKey,
             tokenType: 'api_key',
             isConnected: true,
             connectedAt: Date.now(),
@@ -521,9 +421,155 @@ router.post('/klaviyo/connect', async (req, res) => {
 });
 
 // ============================================
-// GET OAUTH URL
+// SHOPIFY - Special handling (requires shop domain)
 // ============================================
+router.get('/shopify/url', (req, res) => {
+    try {
+        const { email, shop } = req.query;
 
+        if (!email) {
+            return res.status(400).json({ error: 'Email required' });
+        }
+
+        if (!shop) {
+            return res.status(400).json({ 
+                error: 'Shop domain required',
+                requiresShop: true,
+                message: 'Please enter your Shopify store domain'
+            });
+        }
+
+        const config = OAUTH_CONFIGS.shopify;
+        const clientId = config.getClientId();
+        
+        if (!clientId) {
+            return res.status(400).json({ error: 'Shopify not configured' });
+        }
+
+        // Normalize shop domain
+        let shopDomain = shop.trim().toLowerCase();
+        if (!shopDomain.includes('.myshopify.com')) {
+            shopDomain = `${shopDomain}.myshopify.com`;
+        }
+        shopDomain = shopDomain.replace(/^https?:\/\//, '');
+
+        const redirectUri = getRedirectUri('shopify');
+        const state = Buffer.from(JSON.stringify({ 
+            email, 
+            platform: 'shopify', 
+            shop: shopDomain,
+            timestamp: Date.now() 
+        })).toString('base64');
+
+        const params = new URLSearchParams({
+            client_id: clientId,
+            scope: config.scopes,
+            redirect_uri: redirectUri,
+            state
+        });
+
+        const url = `https://${shopDomain}/admin/oauth/authorize?${params.toString()}`;
+        
+        console.log(`🔗 Shopify OAuth URL generated for ${shopDomain}`);
+        console.log(`   Redirect URI: ${redirectUri}`);
+        
+        res.json({ success: true, url, platform: 'Shopify', shop: shopDomain });
+
+    } catch (error) {
+        console.error('Shopify URL error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Shopify callback
+router.get('/shopify/callback', async (req, res) => {
+    const { code, state, shop, error: oauthError, error_description } = req.query;
+
+    console.log(`📥 Shopify OAuth callback`, { shop, hasCode: !!code });
+
+    if (oauthError) {
+        console.error('Shopify OAuth error:', oauthError, error_description);
+        return res.redirect(`${FRONTEND_URL}?oauth=error&platform=shopify&error=${encodeURIComponent(error_description || oauthError)}`);
+    }
+
+    if (!code || !state) {
+        return res.redirect(`${FRONTEND_URL}?oauth=error&platform=shopify&error=missing_code`);
+    }
+
+    try {
+        const stateData = JSON.parse(Buffer.from(state, 'base64').toString());
+        const { email } = stateData;
+        const shopDomain = shop || stateData.shop;
+
+        if (!email || !shopDomain) {
+            throw new Error('Missing email or shop in state');
+        }
+
+        const config = OAUTH_CONFIGS.shopify;
+        const clientId = config.getClientId();
+        const clientSecret = config.getClientSecret();
+
+        const tokenResponse = await fetch(`https://${shopDomain}/admin/oauth/access_token`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                client_id: clientId,
+                client_secret: clientSecret,
+                code
+            })
+        });
+
+        const tokens = await tokenResponse.json();
+
+        if (tokens.error) {
+            throw new Error(tokens.error_description || tokens.error);
+        }
+
+        // Get shop info
+        let shopInfo = null;
+        try {
+            const shopResponse = await fetch(`https://${shopDomain}/admin/api/2024-01/shop.json`, {
+                headers: { 'X-Shopify-Access-Token': tokens.access_token }
+            });
+            const shopData = await shopResponse.json();
+            shopInfo = shopData.shop;
+        } catch (e) {
+            console.log('Could not fetch shop info');
+        }
+
+        const user = await User.findOne({ email: email.toLowerCase() });
+        if (!user) throw new Error('User not found');
+
+        if (!user.connectedAccounts) user.connectedAccounts = [];
+        user.connectedAccounts = user.connectedAccounts.filter(acc => acc.platform !== 'shopify');
+
+        user.connectedAccounts.push({
+            platform: 'shopify',
+            platformUserId: shopInfo?.id?.toString() || null,
+            platformUsername: shopInfo?.name || shopDomain,
+            shopDomain: shopDomain,
+            accessToken: tokens.access_token,
+            scope: tokens.scope,
+            tokenType: 'Bearer',
+            isConnected: true,
+            connectedAt: Date.now(),
+            metadata: shopInfo
+        });
+
+        await user.save();
+        console.log(`✅ Shopify connected for ${email}`);
+
+        res.redirect(`${FRONTEND_URL}?oauth=success&platform=shopify`);
+
+    } catch (error) {
+        console.error('Shopify callback error:', error);
+        res.redirect(`${FRONTEND_URL}?oauth=error&platform=shopify&error=${encodeURIComponent(error.message)}`);
+    }
+});
+
+// ============================================
+// GET OAUTH URL (Generic)
+// ============================================
 router.get('/:platform/url', (req, res) => {
     try {
         const { platform } = req.params;
@@ -540,8 +586,16 @@ router.get('/:platform/url', (req, res) => {
 
         if (config.type === 'api_key') {
             return res.status(400).json({ 
-                error: `${config.name} uses API keys. Use POST /api/oauth/${platform}/connect instead.`,
+                error: `${config.name} uses API keys`,
                 type: 'api_key'
+            });
+        }
+
+        if (config.type === 'shopify') {
+            return res.status(400).json({ 
+                error: 'Shopify requires shop domain',
+                type: 'shopify',
+                requiresShop: true
             });
         }
 
@@ -550,49 +604,136 @@ router.get('/:platform/url', (req, res) => {
             return res.status(400).json({ error: `${platform} not configured` });
         }
 
-        const redirectUri = `${BACKEND_URL}/api/oauth/${platform}/callback`;
-        const state = Buffer.from(JSON.stringify({ email, platform, timestamp: Date.now() })).toString('base64');
+        const redirectUri = getRedirectUri(platform);
+        const state = Buffer.from(JSON.stringify({ 
+            email, 
+            platform, 
+            timestamp: Date.now() 
+        })).toString('base64');
 
-        const params = new URLSearchParams({
-            response_type: 'code',
-            state
-        });
+        console.log(`🔗 Generating OAuth URL for ${platform}`);
+        console.log(`   Client ID: ${clientId.substring(0, 10)}...`);
+        console.log(`   Redirect URI: ${redirectUri}`);
 
-        // Platform-specific parameters
-        if (platform === 'tiktok') {
-            params.set('client_key', clientId);
-            params.set('scope', config.scopes);
-            params.set('redirect_uri', redirectUri);
-        } else if (platform === 'google' || platform === 'google_fit') {
-            params.set('client_id', clientId);
-            params.set('redirect_uri', redirectUri);
-            params.set('scope', config.scopes);
-            params.set('access_type', 'offline');
-            params.set('prompt', 'consent');
-        } else if (platform === 'notion') {
-            params.set('client_id', clientId);
-            params.set('redirect_uri', redirectUri);
-            params.set('owner', 'user');
-        } else if (platform === 'twitter') {
-            params.set('client_id', clientId);
-            params.set('redirect_uri', redirectUri);
-            params.set('scope', config.scopes);
-            params.set('code_challenge', 'challenge');
-            params.set('code_challenge_method', 'plain');
-        } else if (platform === 'stripe') {
-            params.set('client_id', clientId);
-            params.set('redirect_uri', redirectUri);
-            params.set('scope', config.scopes);
-            params.set('response_type', 'code');
-        } else {
-            params.set('client_id', clientId);
-            params.set('redirect_uri', redirectUri);
-            if (config.scopes) {
+        let url;
+        const params = new URLSearchParams();
+
+        // Platform-specific URL building
+        switch (platform) {
+            case 'tiktok':
+                params.set('client_key', clientId);
+                params.set('response_type', 'code');
                 params.set('scope', config.scopes);
-            }
+                params.set('redirect_uri', redirectUri);
+                params.set('state', state);
+                url = `${config.authUrl}?${params.toString()}`;
+                break;
+
+            case 'google':
+                params.set('client_id', clientId);
+                params.set('response_type', 'code');
+                params.set('redirect_uri', redirectUri);
+                params.set('scope', config.scopes);
+                params.set('state', state);
+                params.set('access_type', 'offline');
+                params.set('prompt', 'consent');
+                url = `${config.authUrl}?${params.toString()}`;
+                break;
+
+            case 'discord':
+                params.set('client_id', clientId);
+                params.set('response_type', 'code');
+                params.set('redirect_uri', redirectUri);
+                params.set('scope', config.scopes);
+                params.set('state', state);
+                url = `${config.authUrl}?${params.toString()}`;
+                break;
+
+            case 'github':
+                params.set('client_id', clientId);
+                params.set('redirect_uri', redirectUri);
+                params.set('scope', config.scopes);
+                params.set('state', state);
+                url = `${config.authUrl}?${params.toString()}`;
+                break;
+
+            case 'slack':
+                params.set('client_id', clientId);
+                params.set('redirect_uri', redirectUri);
+                params.set('scope', config.scopes);
+                params.set('state', state);
+                url = `${config.authUrl}?${params.toString()}`;
+                break;
+
+            case 'notion':
+                params.set('client_id', clientId);
+                params.set('response_type', 'code');
+                params.set('redirect_uri', redirectUri);
+                params.set('owner', 'user');
+                params.set('state', state);
+                url = `${config.authUrl}?${params.toString()}`;
+                break;
+
+            case 'spotify':
+            case 'fitbit':
+                params.set('client_id', clientId);
+                params.set('response_type', 'code');
+                params.set('redirect_uri', redirectUri);
+                params.set('scope', config.scopes);
+                params.set('state', state);
+                url = `${config.authUrl}?${params.toString()}`;
+                break;
+
+            case 'twitter':
+                params.set('client_id', clientId);
+                params.set('response_type', 'code');
+                params.set('redirect_uri', redirectUri);
+                params.set('scope', config.scopes);
+                params.set('state', state);
+                params.set('code_challenge', 'challenge');
+                params.set('code_challenge_method', 'plain');
+                url = `${config.authUrl}?${params.toString()}`;
+                break;
+
+            case 'stripe':
+                params.set('client_id', clientId);
+                params.set('response_type', 'code');
+                params.set('redirect_uri', redirectUri);
+                params.set('scope', config.scopes);
+                params.set('state', state);
+                url = `${config.authUrl}?${params.toString()}`;
+                break;
+
+            case 'linkedin':
+                params.set('client_id', clientId);
+                params.set('response_type', 'code');
+                params.set('redirect_uri', redirectUri);
+                params.set('scope', config.scopes);
+                params.set('state', state);
+                url = `${config.authUrl}?${params.toString()}`;
+                break;
+
+            case 'dropbox':
+                params.set('client_id', clientId);
+                params.set('response_type', 'code');
+                params.set('redirect_uri', redirectUri);
+                params.set('state', state);
+                params.set('token_access_type', 'offline');
+                url = `${config.authUrl}?${params.toString()}`;
+                break;
+
+            default:
+                params.set('client_id', clientId);
+                params.set('response_type', 'code');
+                params.set('redirect_uri', redirectUri);
+                params.set('state', state);
+                if (config.scopes) {
+                    params.set('scope', config.scopes);
+                }
+                url = `${config.authUrl}?${params.toString()}`;
         }
 
-        const url = `${config.authUrl}?${params.toString()}`;
+        console.log(`   Generated URL: ${url.substring(0, 100)}...`);
         res.json({ success: true, url, platform: config.name });
 
     } catch (error) {
@@ -602,14 +743,15 @@ router.get('/:platform/url', (req, res) => {
 });
 
 // ============================================
-// OAUTH CALLBACK HANDLER
+// OAUTH CALLBACK HANDLER (Generic)
 // ============================================
-
 router.get('/:platform/callback', async (req, res) => {
     const { platform } = req.params;
     const { code, state, error: oauthError, error_description } = req.query;
 
     console.log(`📥 OAuth callback for ${platform}`);
+    console.log(`   Has code: ${!!code}`);
+    console.log(`   Has state: ${!!state}`);
 
     if (oauthError) {
         console.error(`OAuth error for ${platform}:`, oauthError, error_description);
@@ -617,7 +759,7 @@ router.get('/:platform/callback', async (req, res) => {
     }
 
     if (!code || !state) {
-        return res.redirect(`${FRONTEND_URL}?oauth=error&platform=${platform}&error=missing_code`);
+        return res.redirect(`${FRONTEND_URL}?oauth=error&platform=${platform}&error=missing_code_or_state`);
     }
 
     try {
@@ -629,144 +771,220 @@ router.get('/:platform/callback', async (req, res) => {
         }
 
         const config = OAUTH_CONFIGS[platform];
+        if (!config || !config.tokenUrl) {
+            throw new Error(`Invalid platform: ${platform}`);
+        }
+
         const clientId = config.getClientId();
         const clientSecret = config.getClientSecret();
-        const redirectUri = `${BACKEND_URL}/api/oauth/${platform}/callback`;
+        const redirectUri = getRedirectUri(platform);
+
+        console.log(`   Exchanging code for tokens...`);
+        console.log(`   Token URL: ${config.tokenUrl}`);
+        console.log(`   Redirect URI: ${redirectUri}`);
 
         let tokenResponse;
         let tokens;
 
         // Platform-specific token exchange
-        if (platform === 'tiktok') {
-            tokenResponse = await fetch(config.tokenUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: new URLSearchParams({
-                    client_key: clientId,
-                    client_secret: clientSecret,
-                    code,
-                    grant_type: 'authorization_code',
-                    redirect_uri: redirectUri
-                })
-            });
-        } else if (platform === 'meta') {
-            const metaUrl = `${config.tokenUrl}?client_id=${clientId}&client_secret=${clientSecret}&code=${code}&redirect_uri=${encodeURIComponent(redirectUri)}`;
-            tokenResponse = await fetch(metaUrl);
-        } else if (platform === 'spotify' || platform === 'fitbit') {
-            tokenResponse = await fetch(config.tokenUrl, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'Authorization': 'Basic ' + Buffer.from(`${clientId}:${clientSecret}`).toString('base64')
-                },
-                body: new URLSearchParams({
-                    code,
-                    grant_type: 'authorization_code',
-                    redirect_uri: redirectUri
-                })
-            });
-        } else if (platform === 'notion') {
-            tokenResponse = await fetch(config.tokenUrl, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': 'Basic ' + Buffer.from(`${clientId}:${clientSecret}`).toString('base64')
-                },
-                body: JSON.stringify({
-                    grant_type: 'authorization_code',
-                    code,
-                    redirect_uri: redirectUri
-                })
-            });
-        } else if (platform === 'github') {
-            tokenResponse = await fetch(config.tokenUrl, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'Accept': 'application/json'
-                },
-                body: new URLSearchParams({
-                    client_id: clientId,
-                    client_secret: clientSecret,
-                    code,
-                    redirect_uri: redirectUri
-                })
-            });
-        } else if (platform === 'twitter') {
-            tokenResponse = await fetch(config.tokenUrl, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'Authorization': 'Basic ' + Buffer.from(`${clientId}:${clientSecret}`).toString('base64')
-                },
-                body: new URLSearchParams({
-                    code,
-                    grant_type: 'authorization_code',
-                    redirect_uri: redirectUri,
-                    code_verifier: 'challenge'
-                })
-            });
-        } else if (platform === 'stripe') {
-            tokenResponse = await fetch(config.tokenUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: new URLSearchParams({
-                    client_secret: clientSecret,
-                    code,
-                    grant_type: 'authorization_code'
-                })
-            });
-        } else if (platform === 'discord') {
-            tokenResponse = await fetch(config.tokenUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: new URLSearchParams({
-                    client_id: clientId,
-                    client_secret: clientSecret,
-                    code,
-                    grant_type: 'authorization_code',
-                    redirect_uri: redirectUri
-                })
-            });
-        } else if (platform === 'slack') {
-            tokenResponse = await fetch(config.tokenUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: new URLSearchParams({
-                    client_id: clientId,
-                    client_secret: clientSecret,
-                    code,
-                    redirect_uri: redirectUri
-                })
-            });
-        } else if (platform === 'strava') {
-            tokenResponse = await fetch(config.tokenUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: new URLSearchParams({
-                    client_id: clientId,
-                    client_secret: clientSecret,
-                    code,
-                    grant_type: 'authorization_code'
-                })
-            });
-        } else {
-            tokenResponse = await fetch(config.tokenUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: new URLSearchParams({
-                    client_id: clientId,
-                    client_secret: clientSecret,
-                    code,
-                    grant_type: 'authorization_code',
-                    redirect_uri: redirectUri
-                })
-            });
+        switch (platform) {
+            case 'tiktok':
+                tokenResponse = await fetch(config.tokenUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: new URLSearchParams({
+                        client_key: clientId,
+                        client_secret: clientSecret,
+                        code,
+                        grant_type: 'authorization_code',
+                        redirect_uri: redirectUri
+                    })
+                });
+                break;
+
+            case 'meta':
+                const metaUrl = `${config.tokenUrl}?client_id=${clientId}&client_secret=${clientSecret}&code=${code}&redirect_uri=${encodeURIComponent(redirectUri)}`;
+                tokenResponse = await fetch(metaUrl);
+                break;
+
+            case 'spotify':
+            case 'fitbit':
+            case 'zoom':
+                tokenResponse = await fetch(config.tokenUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                        'Authorization': 'Basic ' + Buffer.from(`${clientId}:${clientSecret}`).toString('base64')
+                    },
+                    body: new URLSearchParams({
+                        code,
+                        grant_type: 'authorization_code',
+                        redirect_uri: redirectUri
+                    })
+                });
+                break;
+
+            case 'notion':
+                tokenResponse = await fetch(config.tokenUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Basic ' + Buffer.from(`${clientId}:${clientSecret}`).toString('base64')
+                    },
+                    body: JSON.stringify({
+                        grant_type: 'authorization_code',
+                        code,
+                        redirect_uri: redirectUri
+                    })
+                });
+                break;
+
+            case 'github':
+                tokenResponse = await fetch(config.tokenUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                        'Accept': 'application/json'
+                    },
+                    body: new URLSearchParams({
+                        client_id: clientId,
+                        client_secret: clientSecret,
+                        code,
+                        redirect_uri: redirectUri
+                    })
+                });
+                break;
+
+            case 'twitter':
+                tokenResponse = await fetch(config.tokenUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                        'Authorization': 'Basic ' + Buffer.from(`${clientId}:${clientSecret}`).toString('base64')
+                    },
+                    body: new URLSearchParams({
+                        code,
+                        grant_type: 'authorization_code',
+                        redirect_uri: redirectUri,
+                        code_verifier: 'challenge'
+                    })
+                });
+                break;
+
+            case 'discord':
+                tokenResponse = await fetch(config.tokenUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: new URLSearchParams({
+                        client_id: clientId,
+                        client_secret: clientSecret,
+                        code,
+                        grant_type: 'authorization_code',
+                        redirect_uri: redirectUri
+                    })
+                });
+                break;
+
+            case 'slack':
+                tokenResponse = await fetch(config.tokenUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: new URLSearchParams({
+                        client_id: clientId,
+                        client_secret: clientSecret,
+                        code,
+                        redirect_uri: redirectUri
+                    })
+                });
+                break;
+
+            case 'strava':
+                tokenResponse = await fetch(config.tokenUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: new URLSearchParams({
+                        client_id: clientId,
+                        client_secret: clientSecret,
+                        code,
+                        grant_type: 'authorization_code'
+                    })
+                });
+                break;
+
+            case 'stripe':
+                tokenResponse = await fetch(config.tokenUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: new URLSearchParams({
+                        client_secret: clientSecret,
+                        code,
+                        grant_type: 'authorization_code'
+                    })
+                });
+                break;
+
+            case 'google':
+                tokenResponse = await fetch(config.tokenUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: new URLSearchParams({
+                        client_id: clientId,
+                        client_secret: clientSecret,
+                        code,
+                        grant_type: 'authorization_code',
+                        redirect_uri: redirectUri
+                    })
+                });
+                break;
+
+            case 'linkedin':
+                tokenResponse = await fetch(config.tokenUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: new URLSearchParams({
+                        client_id: clientId,
+                        client_secret: clientSecret,
+                        code,
+                        grant_type: 'authorization_code',
+                        redirect_uri: redirectUri
+                    })
+                });
+                break;
+
+            case 'dropbox':
+                tokenResponse = await fetch(config.tokenUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                        'Authorization': 'Basic ' + Buffer.from(`${clientId}:${clientSecret}`).toString('base64')
+                    },
+                    body: new URLSearchParams({
+                        code,
+                        grant_type: 'authorization_code',
+                        redirect_uri: redirectUri
+                    })
+                });
+                break;
+
+            default:
+                tokenResponse = await fetch(config.tokenUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: new URLSearchParams({
+                        client_id: clientId,
+                        client_secret: clientSecret,
+                        code,
+                        grant_type: 'authorization_code',
+                        redirect_uri: redirectUri
+                    })
+                });
         }
 
         tokens = await tokenResponse.json();
+        console.log(`   Token response status: ${tokenResponse.status}`);
 
         if (tokens.error) {
+            console.error(`   Token error:`, tokens);
             throw new Error(tokens.error_description || tokens.error);
         }
 
@@ -780,7 +998,6 @@ router.get('/:platform/callback', async (req, res) => {
             const userInfoEndpoints = {
                 meta: 'https://graph.facebook.com/me?fields=id,name,email,picture',
                 google: 'https://www.googleapis.com/oauth2/v2/userinfo',
-                google_fit: 'https://www.googleapis.com/oauth2/v2/userinfo',
                 github: 'https://api.github.com/user',
                 discord: 'https://discord.com/api/users/@me',
                 spotify: 'https://api.spotify.com/v1/me',
@@ -788,19 +1005,44 @@ router.get('/:platform/callback', async (req, res) => {
                 twitter: 'https://api.twitter.com/2/users/me',
                 strava: 'https://www.strava.com/api/v3/athlete',
                 fitbit: 'https://api.fitbit.com/1/user/-/profile.json',
-                linkedin: 'https://api.linkedin.com/v2/userinfo'
+                linkedin: 'https://api.linkedin.com/v2/userinfo',
+                dropbox: 'https://api.dropboxapi.com/2/users/get_current_account',
+                zoom: 'https://api.zoom.us/v2/users/me'
             };
 
             if (userInfoEndpoints[platform]) {
                 try {
-                    const userResponse = await fetch(userInfoEndpoints[platform], {
-                        headers: { 'Authorization': `Bearer ${accessToken}` }
-                    });
+                    let userResponse;
+                    if (platform === 'dropbox') {
+                        userResponse = await fetch(userInfoEndpoints[platform], {
+                            method: 'POST',
+                            headers: { 
+                                'Authorization': `Bearer ${accessToken}`,
+                                'Content-Type': 'application/json'
+                            },
+                            body: 'null'
+                        });
+                    } else {
+                        userResponse = await fetch(userInfoEndpoints[platform], {
+                            headers: { 'Authorization': `Bearer ${accessToken}` }
+                        });
+                    }
                     platformUserInfo = await userResponse.json();
+                    console.log(`   User info received for ${platform}`);
                 } catch (e) {
-                    console.log('Could not fetch user info:', e.message);
+                    console.log(`   Could not fetch user info: ${e.message}`);
                 }
             }
+        }
+
+        // Handle Notion's different response structure
+        if (platform === 'notion' && tokens.owner) {
+            platformUserInfo = tokens.owner.user || tokens.owner;
+        }
+
+        // Handle Slack's different response structure
+        if (platform === 'slack') {
+            platformUserInfo = tokens.authed_user || platformUserInfo;
         }
 
         // Save to database
@@ -817,10 +1059,10 @@ router.get('/:platform/callback', async (req, res) => {
 
         user.connectedAccounts.push({
             platform,
-            platformUserId: platformUserInfo?.id || platformUserInfo?.sub || platformUserInfo?.data?.id || null,
-            platformUsername: platformUserInfo?.name || platformUserInfo?.login || platformUserInfo?.display_name || platformUserInfo?.username || platformUserInfo?.data?.username || null,
+            platformUserId: platformUserInfo?.id || platformUserInfo?.sub || tokens.user_id || null,
+            platformUsername: platformUserInfo?.name || platformUserInfo?.login || platformUserInfo?.display_name || platformUserInfo?.username || platformUserInfo?.email?.address || null,
             platformEmail: platformUserInfo?.email || null,
-            platformAvatar: platformUserInfo?.picture?.data?.url || platformUserInfo?.avatar_url || platformUserInfo?.images?.[0]?.url || null,
+            platformAvatar: platformUserInfo?.picture?.data?.url || platformUserInfo?.avatar_url || platformUserInfo?.images?.[0]?.url || platformUserInfo?.profile_image_url || null,
             accessToken: tokens.access_token,
             refreshToken: tokens.refresh_token || null,
             expiresAt: tokens.expires_in ? Date.now() + (tokens.expires_in * 1000) : null,
@@ -846,7 +1088,6 @@ router.get('/:platform/callback', async (req, res) => {
 // ============================================
 // GET CONNECTED ACCOUNTS
 // ============================================
-
 router.get('/connected/:email', async (req, res) => {
     try {
         const user = await User.findOne({ email: req.params.email.toLowerCase() });
@@ -876,7 +1117,6 @@ router.get('/connected/:email', async (req, res) => {
 // ============================================
 // DISCONNECT PLATFORM
 // ============================================
-
 router.post('/disconnect', async (req, res) => {
     try {
         const { email, platform } = req.body;
@@ -904,7 +1144,6 @@ router.post('/disconnect', async (req, res) => {
 // ============================================
 // REFRESH TOKEN
 // ============================================
-
 router.post('/refresh', async (req, res) => {
     try {
         const { email, platform } = req.body;
@@ -933,7 +1172,7 @@ router.post('/refresh', async (req, res) => {
 
         let tokenResponse;
 
-        if (platform === 'spotify' || platform === 'fitbit') {
+        if (['spotify', 'fitbit', 'zoom', 'dropbox'].includes(platform)) {
             tokenResponse = await fetch(config.tokenUrl, {
                 method: 'POST',
                 headers: {
@@ -964,7 +1203,6 @@ router.post('/refresh', async (req, res) => {
             throw new Error(tokens.error_description || tokens.error);
         }
 
-        // Update tokens
         account.accessToken = tokens.access_token;
         if (tokens.refresh_token) {
             account.refreshToken = tokens.refresh_token;
