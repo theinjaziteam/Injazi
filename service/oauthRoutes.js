@@ -5,8 +5,8 @@ import { User } from './models.js';
 const router = express.Router();
 
 // IMPORTANT: These must match your deployment URLs
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://injazi.vercel.app';
-const BACKEND_URL = process.env.BACKEND_URL || 'https://injazi-backend.onrender.com';
+const FRONTEND_URL = (process.env.FRONTEND_URL || 'https://injazi.vercel.app').replace(/\/$/, '');
+const BACKEND_URL = (process.env.BACKEND_URL || 'https://injazi-backend.onrender.com').replace(/\/$/, '');
 
 console.log('🔧 OAuth URLs configured:');
 console.log('   Frontend:', FRONTEND_URL);
@@ -296,7 +296,11 @@ const OAUTH_CONFIGS = {
 // HELPER: Get redirect URI for a platform
 // ============================================
 const getRedirectUri = (platform) => {
-    return `${BACKEND_URL}/api/oauth/${platform}/callback`;
+    // Ensure no trailing slashes and proper formatting
+    const baseUrl = BACKEND_URL.replace(/\/$/, '');
+    const redirectUri = `${baseUrl}/api/oauth/${platform}/callback`;
+    console.log(`🔗 Redirect URI for ${platform}: ${redirectUri}`);
+    return redirectUri;
 };
 
 // ============================================
@@ -643,10 +647,16 @@ router.get('/:platform/url', (req, res) => {
             case 'discord':
                 params.set('client_id', clientId);
                 params.set('response_type', 'code');
+                // URLSearchParams automatically encodes, but Discord requires exact match
                 params.set('redirect_uri', redirectUri);
                 params.set('scope', config.scopes);
                 params.set('state', state);
                 url = `${config.authUrl}?${params.toString()}`;
+                console.log(`🔗 Discord OAuth URL generated`);
+                console.log(`   Redirect URI: ${redirectUri}`);
+                console.log(`   ⚠️  IMPORTANT: This exact URL must be registered in Discord Developer Portal!`);
+                console.log(`   ⚠️  Go to: https://discord.com/developers/applications/${clientId}/oauth2`);
+                console.log(`   ⚠️  Add redirect URI: ${redirectUri}`);
                 break;
 
             case 'github':
@@ -754,11 +764,21 @@ router.get('/:platform/callback', async (req, res) => {
     console.log(`   Has state: ${!!state}`);
 
     if (oauthError) {
-        console.error(`OAuth error for ${platform}:`, oauthError, error_description);
-        return res.redirect(`${FRONTEND_URL}?oauth=error&platform=${platform}&error=${encodeURIComponent(error_description || oauthError)}`);
+        console.error(`❌ OAuth error for ${platform}:`, oauthError, error_description);
+        let errorMessage = error_description || oauthError;
+        
+        // Provide helpful error messages for common issues
+        if (oauthError === 'invalid_request' && error_description?.includes('redirect_uri')) {
+            errorMessage = `Invalid redirect URI. Please ensure ${getRedirectUri(platform)} is registered in ${platform} Developer Portal.`;
+            console.error(`   ⚠️  Redirect URI mismatch detected!`);
+            console.error(`   Expected: ${getRedirectUri(platform)}`);
+        }
+        
+        return res.redirect(`${FRONTEND_URL}?oauth=error&platform=${platform}&error=${encodeURIComponent(errorMessage)}`);
     }
 
     if (!code || !state) {
+        console.error(`❌ Missing code or state for ${platform}`);
         return res.redirect(`${FRONTEND_URL}?oauth=error&platform=${platform}&error=missing_code_or_state`);
     }
 
@@ -872,16 +892,19 @@ router.get('/:platform/callback', async (req, res) => {
                 break;
 
             case 'discord':
+                // Discord requires exact redirect_uri match in token exchange
+                const discordTokenBody = new URLSearchParams({
+                    client_id: clientId,
+                    client_secret: clientSecret,
+                    code,
+                    grant_type: 'authorization_code',
+                    redirect_uri: redirectUri
+                });
+                console.log(`   Discord token exchange - redirect_uri: ${redirectUri}`);
                 tokenResponse = await fetch(config.tokenUrl, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                    body: new URLSearchParams({
-                        client_id: clientId,
-                        client_secret: clientSecret,
-                        code,
-                        grant_type: 'authorization_code',
-                        redirect_uri: redirectUri
-                    })
+                    body: discordTokenBody
                 });
                 break;
 
@@ -984,8 +1007,18 @@ router.get('/:platform/callback', async (req, res) => {
         console.log(`   Token response status: ${tokenResponse.status}`);
 
         if (tokens.error) {
-            console.error(`   Token error:`, tokens);
-            throw new Error(tokens.error_description || tokens.error);
+            console.error(`   ❌ Token error:`, tokens);
+            let errorMsg = tokens.error_description || tokens.error;
+            
+            // Provide specific guidance for redirect_uri errors
+            if (tokens.error === 'invalid_request' && (errorMsg?.includes('redirect_uri') || errorMsg?.includes('redirect'))) {
+                errorMsg = `Invalid redirect URI. The redirect URI ${redirectUri} must be exactly registered in ${platform} Developer Portal.`;
+                console.error(`   ⚠️  Redirect URI configuration issue!`);
+                console.error(`   Current redirect URI: ${redirectUri}`);
+                console.error(`   Please verify this exact URL is registered in ${platform} Developer Portal.`);
+            }
+            
+            throw new Error(errorMsg);
         }
 
         console.log(`✅ Tokens received for ${platform}`);
