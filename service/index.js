@@ -7,6 +7,36 @@ import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
 import { User } from './models.js';
 import oauthRoutes from './oauthRoutes.js';
+import emailjs from '@emailjs/nodejs';
+
+async function sendVerificationEmail(email, name, code) {
+    try {
+        await emailjs.send(
+            process.env.EMAILJS_SERVICE_ID,
+            process.env.EMAILJS_TEMPLATE_ID,
+            { to_email: email, to_name: name, verification_code: code },
+            { publicKey: process.env.EMAILJS_PUBLIC_KEY, privateKey: process.env.EMAILJS_PRIVATE_KEY }
+        );
+        console.log('✅ Verification email sent to:', email);
+    } catch (error) {
+        console.error('❌ Email send failed:', error);
+        // Don't throw - user can request resend
+    }
+}
+
+async function sendResetEmail(email, name, code) {
+    try {
+        await emailjs.send(
+            process.env.EMAILJS_SERVICE_ID,
+            process.env.EMAILJS_RESET_TEMPLATE_ID || process.env.EMAILJS_TEMPLATE_ID,
+            { to_email: email, to_name: name, verification_code: code },
+            { publicKey: process.env.EMAILJS_PUBLIC_KEY, privateKey: process.env.EMAILJS_PRIVATE_KEY }
+        );
+        console.log('✅ Reset email sent to:', email);
+    } catch (error) {
+        console.error('❌ Reset email send failed:', error);
+    }
+}
 
 dotenv.config();
 
@@ -560,12 +590,12 @@ app.post('/api/auth/register', async (req, res) => {
             lastSentAt: Date.now()
         });
 
-        return res.json({ 
-            success: true,
-            code: verificationCode,
-            name: name.trim(),
-            email: normalizedEmail,
-            message: 'Verification code generated'
+        await sendVerificationEmail(normalizedEmail, name.trim(), verificationCode);
+
+return res.json({ 
+    success: true,
+    email: normalizedEmail,
+    message: 'Verification code sent to your email'
         });
 
     } catch (error) {
@@ -683,12 +713,13 @@ app.post('/api/auth/resend', async (req, res) => {
         pending.lastSentAt = Date.now();
         pendingUsers.set(normalizedEmail, pending);
 
-        res.json({ 
-            success: true, 
-            code: newCode,
-            name: pending.userData.name,
-            email: normalizedEmail,
-            cooldownRemaining: RESEND_COOLDOWN / 1000
+       await sendVerificationEmail(normalizedEmail, pending.userData.name, newCode);
+
+res.json({ 
+    success: true,
+    email: normalizedEmail,
+    message: 'New code sent to your email',
+    cooldownRemaining: RESEND_COOLDOWN / 1000
         });
 
     } catch (error) {
@@ -721,11 +752,12 @@ app.post('/api/auth/forgot-password', async (req, res) => {
         user.passwordResetLastSent = Date.now();
         await user.save();
 
-        res.json({ 
-            success: true, 
-            code: resetCode,
-            name: user.name,
-            email: normalizedEmail
+        await sendResetEmail(normalizedEmail, user.name, resetCode);
+
+res.json({ 
+    success: true,
+    email: normalizedEmail,
+    message: 'Reset code sent to your email'
         });
 
     } catch (error) {
@@ -1121,3 +1153,4 @@ app.listen(PORT, () => {
     console.log(`📺 AdMob callback: /api/admob/reward-callback`);
     console.log(`📺 Daily ad limit: ${MAX_DAILY_ADS} ads per user`);
 });
+
