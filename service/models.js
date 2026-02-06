@@ -718,6 +718,21 @@ UserSchema.methods.isPlatformConnected = function(platform) {
     if (account.expiresAt && Date.now() > account.expiresAt) return false;
     return true;
 };
+// ============================================
+// PENDING USER (survives server restarts)
+// ============================================
 
+const PendingUserSchema = new mongoose.Schema({
+    email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+    hashedPassword: { type: String, required: true },
+    name: { type: String, required: true, trim: true },
+    country: { type: String, default: 'Unknown' },
+    code: { type: String, required: true },
+    lastSentAt: { type: Date, default: Date.now },
+    createdAt: { type: Date, default: Date.now, expires: 900 }  // Auto-deletes after 15 minutes
+});
+
+export const PendingUser = mongoose.model('PendingUser', PendingUserSchema);
 // ========== EXPORT ==========
 export const User = mongoose.model('User', UserSchema);
+
