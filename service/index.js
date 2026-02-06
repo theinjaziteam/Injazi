@@ -5,9 +5,15 @@ import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
-import { User } from './models.js';
+import { User, PendingUser } from './models.js';
 import oauthRoutes from './oauthRoutes.js';
 import emailjs from '@emailjs/nodejs';
+
+dotenv.config();
+
+// ============================================
+// EMAIL HELPERS (server-side, codes never sent to client)
+// ============================================
 
 async function sendVerificationEmail(email, name, code) {
     try {
@@ -20,7 +26,6 @@ async function sendVerificationEmail(email, name, code) {
         console.log('✅ Verification email sent to:', email);
     } catch (error) {
         console.error('❌ Email send failed:', error);
-        // Don't throw - user can request resend
     }
 }
 
@@ -38,11 +43,18 @@ async function sendResetEmail(email, name, code) {
     }
 }
 
-dotenv.config();
+// ============================================
+// CONFIG
+// ============================================
 
 const app = express();
 
-const JWT_SECRET = process.env.JWT_SECRET || 'injazi-secret-change-me';
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+    console.error('❌ FATAL: JWT_SECRET environment variable is required');
+    process.exit(1);
+}
+
 const PORT = process.env.PORT || 5000;
 const MONGODB_URI = process.env.MONGODB_URI;
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
@@ -106,7 +118,7 @@ const rateLimiter = (endpoint) => {
     };
 };
 
-// Cleanup old rate limit entries
+// Cleanup old rate limit entries every 5 minutes
 setInterval(() => {
     const now = Date.now();
     for (const [key, entry] of rateLimits.entries()) {
@@ -117,12 +129,11 @@ setInterval(() => {
 }, 5 * 60 * 1000);
 
 // ============================================
-// PENDING USERS (Email Verification)
+// CONSTANTS
 // ============================================
 
-const pendingUsers = new Map();
-const RESEND_COOLDOWN = 5 * 60 * 1000;
-const CODE_EXPIRY = 15 * 60 * 1000;
+const RESEND_COOLDOWN = 5 * 60 * 1000;  // 5 minutes
+const CODE_EXPIRY = 15 * 60 * 1000;     // 15 minutes
 
 // ============================================
 // MIDDLEWARE
@@ -137,17 +148,20 @@ const allowedOrigins = [
 
 app.use(cors({
     origin: function (origin, callback) {
+        // Allow server-to-server requests (no origin header)
         if (!origin) return callback(null, true);
         if (allowedOrigins.some(allowed => origin.startsWith(allowed.replace(/\/$/, '')))) {
             return callback(null, true);
         }
-        callback(null, true);
+        console.warn(`⚠️ CORS blocked origin: ${origin}`);
+        callback(new Error('Not allowed by CORS'));
     },
     credentials: true
 }));
 
 app.use(express.json({ limit: '10mb' }));
 
+// Authentication middleware — extracts userId from JWT if present
 const optionalAuth = (req, res, next) => {
     const authHeader = req.headers.authorization;
     if (authHeader?.startsWith('Bearer ')) {
@@ -159,13 +173,31 @@ const optionalAuth = (req, res, next) => {
     next();
 };
 
+// Strict authentication middleware — rejects if no valid JWT
+const requireAuth = (req, res, next) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+        return res.status(401).json({ message: 'Authentication required' });
+    }
+    try {
+        const decoded = jwt.verify(authHeader.slice(7), JWT_SECRET);
+        req.userId = decoded.id;
+        next();
+    } catch {
+        return res.status(401).json({ message: 'Invalid or expired token' });
+    }
+};
+
 // ============================================
 // DATABASE
 // ============================================
 
 mongoose.connect(MONGODB_URI)
     .then(() => console.log('✅ MongoDB Connected'))
-    .catch(err => console.error('❌ MongoDB Error:', err));
+    .catch(err => {
+        console.error('❌ MongoDB Error:', err);
+        process.exit(1);
+    });
 
 const generateToken = (userId) => jwt.sign({ id: userId }, JWT_SECRET, { expiresIn: '30d' });
 const generateVerificationCode = () => Math.floor(100000 + Math.random() * 900000).toString();
@@ -176,7 +208,7 @@ const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 // ============================================
 
 app.get('/', (req, res) => {
-    res.json({ status: 'ok', message: 'InJazi API Running', version: '2.0.0' });
+    res.json({ status: 'ok', message: 'InJazi API Running', version: '3.0.0' });
 });
 
 app.get('/api/health', (req, res) => {
@@ -562,13 +594,14 @@ app.post('/api/auth/register', async (req, res) => {
             return res.status(400).json({ message: 'User already exists. Please log in.' });
         }
 
-        const existingPending = pendingUsers.get(normalizedEmail);
-        if (existingPending && existingPending.expiresAt > Date.now()) {
-            const timeSinceLastSent = Date.now() - existingPending.lastSentAt;
+        // Check for existing pending registration (persisted in MongoDB)
+        const existingPending = await PendingUser.findOne({ email: normalizedEmail });
+        if (existingPending) {
+            const timeSinceLastSent = Date.now() - existingPending.lastSentAt.getTime();
             if (timeSinceLastSent < RESEND_COOLDOWN) {
                 const timeRemaining = Math.ceil((RESEND_COOLDOWN - timeSinceLastSent) / 1000);
                 return res.status(400).json({ 
-                    message: `Please wait before requesting a new code.`,
+                    message: 'Please wait before requesting a new code.',
                     cooldownRemaining: timeRemaining
                 });
             }
@@ -577,25 +610,28 @@ app.post('/api/auth/register', async (req, res) => {
         const hashedPassword = await bcrypt.hash(password, 10);
         const verificationCode = generateVerificationCode();
         
-        pendingUsers.set(normalizedEmail, {
-            userData: {
+        // Persist pending user in MongoDB (survives server restarts)
+        await PendingUser.findOneAndUpdate(
+            { email: normalizedEmail },
+            {
                 email: normalizedEmail,
-                password: hashedPassword,
+                hashedPassword: hashedPassword,
                 name: name.trim(),
                 country: country || 'Unknown',
-                createdAt: Date.now()
+                code: verificationCode,
+                lastSentAt: new Date(),
+                createdAt: new Date()  // Resets the TTL
             },
-            code: verificationCode,
-            expiresAt: Date.now() + CODE_EXPIRY,
-            lastSentAt: Date.now()
-        });
+            { upsert: true, new: true }
+        );
 
+        // Send email server-side — code NEVER sent to client
         await sendVerificationEmail(normalizedEmail, name.trim(), verificationCode);
 
-return res.json({ 
-    success: true,
-    email: normalizedEmail,
-    message: 'Verification code sent to your email'
+        return res.json({ 
+            success: true,
+            email: normalizedEmail,
+            message: 'Verification code sent to your email'
         });
 
     } catch (error) {
@@ -614,8 +650,9 @@ app.post('/api/auth/login', async (req, res) => {
 
         const normalizedEmail = email.toLowerCase().trim();
 
-        const pendingUser = pendingUsers.get(normalizedEmail);
-        if (pendingUser && pendingUser.expiresAt > Date.now()) {
+        // Check if user has a pending verification
+        const pendingUser = await PendingUser.findOne({ email: normalizedEmail });
+        if (pendingUser) {
             return res.status(400).json({ 
                 message: 'Please verify your email first.',
                 requiresVerification: true
@@ -652,28 +689,28 @@ app.post('/api/auth/verify', async (req, res) => {
         const { email, code } = req.body;
         const normalizedEmail = email.toLowerCase().trim();
 
-        const pending = pendingUsers.get(normalizedEmail);
+        const pending = await PendingUser.findOne({ email: normalizedEmail });
         
         if (!pending) {
             return res.status(400).json({ message: 'No pending verification. Please register again.' });
-        }
-
-        if (pending.expiresAt < Date.now()) {
-            pendingUsers.delete(normalizedEmail);
-            return res.status(400).json({ message: 'Code expired. Please register again.' });
         }
 
         if (pending.code !== code) {
             return res.status(400).json({ message: 'Invalid verification code.' });
         }
 
+        // Create the real user from pending data
         const user = new User({
-            ...pending.userData,
+            email: pending.email,
+            password: pending.hashedPassword,
+            name: pending.name,
+            country: pending.country,
+            createdAt: Date.now(),
             isEmailVerified: true
         });
 
         await user.save();
-        pendingUsers.delete(normalizedEmail);
+        await PendingUser.deleteOne({ email: normalizedEmail });
 
         const token = generateToken(user._id);
         const userObj = user.toObject();
@@ -692,13 +729,13 @@ app.post('/api/auth/resend', async (req, res) => {
         const { email } = req.body;
         const normalizedEmail = email.toLowerCase().trim();
 
-        const pending = pendingUsers.get(normalizedEmail);
+        const pending = await PendingUser.findOne({ email: normalizedEmail });
         
         if (!pending) {
             return res.status(400).json({ message: 'No pending verification. Please register again.' });
         }
 
-        const timeSinceLastSent = Date.now() - pending.lastSentAt;
+        const timeSinceLastSent = Date.now() - pending.lastSentAt.getTime();
         if (timeSinceLastSent < RESEND_COOLDOWN) {
             const timeRemaining = Math.ceil((RESEND_COOLDOWN - timeSinceLastSent) / 1000);
             return res.status(400).json({ 
@@ -709,17 +746,18 @@ app.post('/api/auth/resend', async (req, res) => {
 
         const newCode = generateVerificationCode();
         pending.code = newCode;
-        pending.expiresAt = Date.now() + CODE_EXPIRY;
-        pending.lastSentAt = Date.now();
-        pendingUsers.set(normalizedEmail, pending);
+        pending.lastSentAt = new Date();
+        pending.createdAt = new Date();  // Reset TTL
+        await pending.save();
 
-       await sendVerificationEmail(normalizedEmail, pending.userData.name, newCode);
+        // Send email server-side — code NEVER sent to client
+        await sendVerificationEmail(normalizedEmail, pending.name, newCode);
 
-res.json({ 
-    success: true,
-    email: normalizedEmail,
-    message: 'New code sent to your email',
-    cooldownRemaining: RESEND_COOLDOWN / 1000
+        res.json({ 
+            success: true,
+            email: normalizedEmail,
+            message: 'New code sent to your email',
+            cooldownRemaining: RESEND_COOLDOWN / 1000
         });
 
     } catch (error) {
@@ -735,6 +773,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
 
         const user = await User.findOne({ email: normalizedEmail });
         if (!user) {
+            // Don't reveal whether email exists
             return res.json({ success: true, message: 'If email exists, code was sent.' });
         }
 
@@ -752,12 +791,13 @@ app.post('/api/auth/forgot-password', async (req, res) => {
         user.passwordResetLastSent = Date.now();
         await user.save();
 
+        // Send email server-side — code NEVER sent to client
         await sendResetEmail(normalizedEmail, user.name, resetCode);
 
-res.json({ 
-    success: true,
-    email: normalizedEmail,
-    message: 'Reset code sent to your email'
+        res.json({ 
+            success: true,
+            email: normalizedEmail,
+            message: 'Reset code sent to your email'
         });
 
     } catch (error) {
@@ -803,32 +843,53 @@ app.post('/api/auth/reset-password', async (req, res) => {
 });
 
 // ============================================
-// SYNC & USER ENDPOINTS
+// SYNC & USER ENDPOINTS (now secured)
 // ============================================
 
-app.post('/api/sync', async (req, res) => {
+app.post('/api/sync', requireAuth, async (req, res) => {
     try {
         const userData = req.body;
         if (!userData.email) return res.status(400).json({ message: 'Email required' });
 
+        // Verify the authenticated user matches the email being synced
+        const authUser = await User.findById(req.userId);
+        if (!authUser || authUser.email !== userData.email.toLowerCase().trim()) {
+            return res.status(403).json({ message: 'Not authorized to sync this account' });
+        }
+
         const updateData = { ...userData };
+        // Strip fields that must never be overwritten via sync
         delete updateData._id;
+        delete updateData.email;
         delete updateData.password;
         delete updateData.__v;
-        delete updateData.connectedAccounts; // Don't overwrite OAuth data from sync
+        delete updateData.connectedAccounts;
+        delete updateData.adRewardTransactions;
+        delete updateData.realMoneyBalance;
+        delete updateData.isPremium;
+        delete updateData.premiumUntil;
+        delete updateData.isEmailVerified;
 
-        await User.findOneAndUpdate({ email: userData.email }, updateData, { upsert: false, new: true });
+        await User.findOneAndUpdate(
+            { email: authUser.email }, 
+            updateData, 
+            { upsert: false, new: true }
+        );
         res.json({ success: true });
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
 });
 
-app.get('/api/user/:email', async (req, res) => {
+app.get('/api/user/:email', requireAuth, async (req, res) => {
     try {
-        const user = await User.findOne({ email: req.params.email });
-        if (!user) return res.status(404).json({ message: 'User not found' });
-        const userObj = user.toObject();
+        // Verify the authenticated user matches the requested email
+        const authUser = await User.findById(req.userId);
+        if (!authUser || authUser.email !== req.params.email.toLowerCase().trim()) {
+            return res.status(403).json({ message: 'Not authorized' });
+        }
+
+        const userObj = authUser.toObject();
         delete userObj.password;
         
         // Sanitize connected accounts (remove tokens)
@@ -1132,15 +1193,12 @@ app.get('/api/ai/rate-limit-status', (req, res) => {
 });
 
 // ============================================
-// CLEANUP JOBS
+// 404 CATCH-ALL
 // ============================================
 
-setInterval(() => {
-    const now = Date.now();
-    for (const [email, data] of pendingUsers.entries()) {
-        if (data.expiresAt < now) pendingUsers.delete(email);
-    }
-}, 10 * 60 * 1000);
+app.use((req, res) => {
+    res.status(404).json({ error: 'Not found', path: req.path });
+});
 
 // ============================================
 // START SERVER
@@ -1153,4 +1211,3 @@ app.listen(PORT, () => {
     console.log(`📺 AdMob callback: /api/admob/reward-callback`);
     console.log(`📺 Daily ad limit: ${MAX_DAILY_ADS} ads per user`);
 });
-
