@@ -7,23 +7,38 @@ import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
 import { User, PendingUser } from './models.js';
 import oauthRoutes from './oauthRoutes.js';
-import emailjs from '@emailjs/nodejs';
 
 dotenv.config();
 
 // ============================================
-// EMAIL HELPERS (server-side, codes never sent to client)
+// EMAIL HELPERS (server-side via EmailJS REST API)
 // ============================================
 
 async function sendVerificationEmail(email, name, code) {
     try {
-        await emailjs.send(
-            process.env.EMAILJS_SERVICE_ID,
-            process.env.EMAILJS_TEMPLATE_ID,
-            { to_email: email, to_name: name, verification_code: code },
-            { publicKey: process.env.EMAILJS_PUBLIC_KEY, privateKey: process.env.EMAILJS_PRIVATE_KEY }
-        );
-        console.log('✅ Verification email sent to:', email);
+        const response = await fetch('https://api.emailjs.com/api/v1.0/email/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                service_id: process.env.EMAILJS_SERVICE_ID,
+                template_id: process.env.EMAILJS_TEMPLATE_ID,
+                user_id: process.env.EMAILJS_PUBLIC_KEY,
+                accessToken: process.env.EMAILJS_PRIVATE_KEY,
+                template_params: {
+                    to_email: email,
+                    to_name: name,
+                    verification_code: code,
+                    app_name: 'InJazi',
+                    subject: 'Your InJazi Verification Code'
+                }
+            })
+        });
+        if (response.ok) {
+            console.log('✅ Verification email sent to:', email);
+        } else {
+            const text = await response.text();
+            console.error('❌ EmailJS error:', response.status, text);
+        }
     } catch (error) {
         console.error('❌ Email send failed:', error);
     }
@@ -31,13 +46,30 @@ async function sendVerificationEmail(email, name, code) {
 
 async function sendResetEmail(email, name, code) {
     try {
-        await emailjs.send(
-            process.env.EMAILJS_SERVICE_ID,
-            process.env.EMAILJS_RESET_TEMPLATE_ID || process.env.EMAILJS_TEMPLATE_ID,
-            { to_email: email, to_name: name, verification_code: code },
-            { publicKey: process.env.EMAILJS_PUBLIC_KEY, privateKey: process.env.EMAILJS_PRIVATE_KEY }
-        );
-        console.log('✅ Reset email sent to:', email);
+        const templateId = process.env.EMAILJS_RESET_TEMPLATE_ID || process.env.EMAILJS_TEMPLATE_ID;
+        const response = await fetch('https://api.emailjs.com/api/v1.0/email/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                service_id: process.env.EMAILJS_SERVICE_ID,
+                template_id: templateId,
+                user_id: process.env.EMAILJS_PUBLIC_KEY,
+                accessToken: process.env.EMAILJS_PRIVATE_KEY,
+                template_params: {
+                    to_email: email,
+                    to_name: name,
+                    verification_code: code,
+                    app_name: 'InJazi',
+                    subject: 'Reset Your InJazi Password'
+                }
+            })
+        });
+        if (response.ok) {
+            console.log('✅ Reset email sent to:', email);
+        } else {
+            const text = await response.text();
+            console.error('❌ EmailJS reset error:', response.status, text);
+        }
     } catch (error) {
         console.error('❌ Reset email send failed:', error);
     }
@@ -1211,3 +1243,4 @@ app.listen(PORT, () => {
     console.log(`📺 AdMob callback: /api/admob/reward-callback`);
     console.log(`📺 Daily ad limit: ${MAX_DAILY_ADS} ads per user`);
 });
+
