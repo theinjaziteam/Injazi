@@ -7,6 +7,7 @@ import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
 import { User, PendingUser } from './models.js';
 import oauthRoutes from './oauthRoutes.js';
+import masterAgentRoutes from './masterAgentRoutes.js';
 
 dotenv.config();
 
@@ -257,6 +258,7 @@ app.get('/api/health', (req, res) => {
 // ============================================
 
 app.use('/api/oauth', oauthRoutes);
+app.use('/api/master-agent', masterAgentRoutes);
 
 // ============================================
 // ADMOB REWARDED ADS CALLBACKS
@@ -1243,4 +1245,5 @@ app.listen(PORT, () => {
     console.log(`📺 AdMob callback: /api/admob/reward-callback`);
     console.log(`📺 Daily ad limit: ${MAX_DAILY_ADS} ads per user`);
 });
+
 
