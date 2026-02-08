@@ -476,7 +476,7 @@ const UserSchema = new mongoose.Schema({
     privacyAccepted: { type: Boolean, default: false },
     avatarUrl: String,
     bio: String,
-    
+
     // ========== GAME STATE ==========
     credits: { type: Number, default: 100 },
     realMoneyBalance: { type: Number, default: 0.0 },
@@ -604,6 +604,20 @@ const UserSchema = new mongoose.Schema({
             cartAbandonment: Number
         }
     }],
+
+   // ========== Automations ==========
+    automations: [{
+    id: String,
+    name: String,
+    description: String,
+    task: String,
+    schedule: String,
+    enabled: { type: Boolean, default: true },
+    createdAt: { type: Number, default: Date.now },
+    nextRun: String,
+    lastRun: Number,
+    lastResult: String
+}],
     
     // ========== CONTENT DRAFTS (Social Media Agent) ==========
     contentDrafts: [{
@@ -735,4 +749,5 @@ const PendingUserSchema = new mongoose.Schema({
 export const PendingUser = mongoose.model('PendingUser', PendingUserSchema);
 // ========== EXPORT ==========
 export const User = mongoose.model('User', UserSchema);
+
 
