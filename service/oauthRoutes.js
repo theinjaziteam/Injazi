@@ -199,7 +199,7 @@ const OAUTH_CONFIGS = {
         description: 'Code repository',
         authUrl: 'https://github.com/login/oauth/authorize',
         tokenUrl: 'https://github.com/login/oauth/access_token',
-        scopes: 'user:email read:user',
+        scopes: 'repo user:email read:user',
         getClientId: () => process.env.GITHUB_CLIENT_ID,
         getClientSecret: () => process.env.GITHUB_CLIENT_SECRET
     },
