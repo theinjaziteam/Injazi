@@ -59,65 +59,89 @@ async function think(prompt, options = {}) {
 }
 
 // ============================================
-// HELPER: GET USER TOKEN (FIXED - checks both arrays)
+// HELPER: GET USER TOKEN (CRITICAL FIX - select hidden fields)
 // ============================================
 async function getUserToken(email, platform) {
-    const user = await User.findOne({ email });
-    if (!user) throw new Error('User not found');
+    // CRITICAL: accessToken has select: false in schema, must explicitly include it
+    const user = await User.findOne({ email }).select('+connectedAccounts.accessToken +connectedAccounts.refreshToken');
+    
+    if (!user) {
+        console.log(`[getUserToken] User not found: ${email}`);
+        throw new Error('User not found');
+    }
     
     const platformLower = platform.toLowerCase();
-    let account = null;
+    console.log(`[getUserToken] Looking for platform: ${platformLower}`);
+    console.log(`[getUserToken] User has ${user.connectedAccounts?.length || 0} connected accounts`);
     
-    // Check connectedAccounts array
-    if (user.connectedAccounts && user.connectedAccounts.length > 0) {
-        account = user.connectedAccounts.find(a => 
-            a && a.platform && a.platform.toLowerCase() === platformLower && a.accessToken
-        );
-    }
-    
-    // Check connectedOAuthAccounts array (used by oauthRoutes.js)
-    if (!account && user.connectedOAuthAccounts && user.connectedOAuthAccounts.length > 0) {
-        account = user.connectedOAuthAccounts.find(a => 
-            a && a.platform && a.platform.toLowerCase() === platformLower && a.accessToken
-        );
-    }
+    // Find account in connectedAccounts
+    const account = user.connectedAccounts?.find(a => 
+        a && a.platform && a.platform.toLowerCase() === platformLower
+    );
     
     if (!account) {
-        console.log(`[getUserToken] Platform "${platform}" not found for ${email}`);
-        console.log(`[getUserToken] connectedAccounts:`, user.connectedAccounts?.map(a => a?.platform) || []);
-        console.log(`[getUserToken] connectedOAuthAccounts:`, user.connectedOAuthAccounts?.map(a => a?.platform) || []);
+        console.log(`[getUserToken] Platform "${platform}" not found`);
+        console.log(`[getUserToken] Available platforms:`, user.connectedAccounts?.map(a => a?.platform) || []);
         throw new Error(`${platform} not connected`);
     }
     
+    if (!account.accessToken) {
+        console.log(`[getUserToken] Platform "${platform}" found but no accessToken`);
+        throw new Error(`${platform} token missing - please reconnect`);
+    }
+    
     // Check expiry
-    if (account.tokenExpiry && new Date(account.tokenExpiry) < new Date()) {
+    if (account.expiresAt && Date.now() > account.expiresAt) {
+        console.log(`[getUserToken] Token expired for ${platform}`);
         throw new Error(`${platform} token expired - please reconnect`);
     }
     
-    console.log(`[getUserToken] Found ${platform} token for ${email}`);
+    console.log(`[getUserToken] SUCCESS - Found ${platform} token for ${email}`);
     
     return {
         accessToken: account.accessToken,
         refreshToken: account.refreshToken,
-        shopDomain: account.shopDomain || account.metadata?.shopDomain,
+        shopDomain: account.metadata?.shopDomain,
         metadata: account.metadata || {}
     };
 }
 
 // ============================================
-// HELPER: GET CONNECTED PLATFORMS (FIXED)
+// HELPER: GET CONNECTED PLATFORMS (CRITICAL FIX - use isConnected flag)
 // ============================================
-function getConnectedPlatforms(user) {
-    const allAccounts = [
-        ...(user?.connectedAccounts || []),
-        ...(user?.connectedOAuthAccounts || [])
-    ];
+async function getConnectedPlatformsFromDB(email) {
+    // Don't need to select accessToken here - just check isConnected flag
+    const user = await User.findOne({ email });
     
-    const platforms = allAccounts
-        .filter(a => a && a.platform && a.accessToken)
+    if (!user || !user.connectedAccounts) {
+        console.log(`[getConnectedPlatforms] No user or no connectedAccounts for ${email}`);
+        return [];
+    }
+    
+    console.log(`[getConnectedPlatforms] Checking ${user.connectedAccounts.length} accounts`);
+    
+    // Use isConnected flag instead of accessToken (since accessToken is hidden)
+    const platforms = user.connectedAccounts
+        .filter(a => {
+            const isValid = a && a.platform && a.isConnected === true;
+            console.log(`[getConnectedPlatforms] ${a?.platform}: isConnected=${a?.isConnected}`);
+            return isValid;
+        })
         .map(a => a.platform.toLowerCase());
     
-    // Remove duplicates
+    const unique = [...new Set(platforms)];
+    console.log(`[getConnectedPlatforms] Connected platforms: ${unique.join(', ') || 'None'}`);
+    return unique;
+}
+
+// Sync version for when we already have user object (with tokens selected)
+function getConnectedPlatformsFromUser(user) {
+    if (!user || !user.connectedAccounts) return [];
+    
+    const platforms = user.connectedAccounts
+        .filter(a => a && a.platform && (a.isConnected === true || a.accessToken))
+        .map(a => a.platform.toLowerCase());
+    
     return [...new Set(platforms)];
 }
 
@@ -382,7 +406,7 @@ const tools = {
             const fullName = await getFullRepoName(token.accessToken, params.repo);
             console.log('[GitHub] Creating file:', params.path, 'in', fullName);
             
-            // Wait a moment for repo to be fully initialized
+            // Wait for repo to be fully initialized
             await new Promise(resolve => setTimeout(resolve, 2000));
             
             const content = params.content || '';
@@ -1326,8 +1350,7 @@ function getNextRunTime(parsedSchedule) {
 async function runAutomation(automation, email) {
     console.log(`[Automation] Running: ${automation.name}`);
     try {
-        const user = await User.findOne({ email });
-        const connectedPlatforms = getConnectedPlatforms(user);
+        const connectedPlatforms = await getConnectedPlatformsFromDB(email);
         const plan = await planExecution(automation.task, connectedPlatforms, { automationRun: true });
         if (!plan.canComplete) return { success: false, error: 'Cannot complete', missing: plan.missingPlatforms };
         const { results, executionLog } = await executePlan(plan, email, connectedPlatforms);
@@ -1405,19 +1428,19 @@ function formatResult(action, data) {
 // Main chat endpoint
 router.post('/chat', async (req, res) => {
     try {
-        const { email, message, connectedPlatforms = [], userName = 'User', goal } = req.body;
+        const { email, message, userName = 'User', goal } = req.body;
         
         if (!email || !message) {
             return res.status(400).json({ error: 'Email and message required' });
         }
         
-        const user = await User.findOne({ email });
-        const actualPlatforms = getConnectedPlatforms(user);
+        // Get connected platforms using the fixed function
+        const connectedPlatforms = await getConnectedPlatformsFromDB(email);
         
-        console.log(`\n${'='.repeat(50)}\n[MasterAgent] "${message}"\n[Email] ${email}\n[Platforms] ${actualPlatforms.join(', ') || 'None'}\n${'='.repeat(50)}`);
+        console.log(`\n${'='.repeat(50)}\n[MasterAgent] "${message}"\n[Email] ${email}\n[Platforms] ${connectedPlatforms.join(', ') || 'None'}\n${'='.repeat(50)}`);
         
         // Plan execution
-        const plan = await planExecution(message, actualPlatforms, { userName, goal });
+        const plan = await planExecution(message, connectedPlatforms, { userName, goal });
         console.log('[Plan]', JSON.stringify(plan, null, 2));
         
         // Check if we can complete
@@ -1434,7 +1457,7 @@ router.post('/chat', async (req, res) => {
         
         if (plan.steps?.length) {
             console.log(`[Execute] Running ${plan.steps.length} steps...`);
-            executionResult = await executePlan(plan, email, actualPlatforms);
+            executionResult = await executePlan(plan, email, connectedPlatforms);
             toolsUsed = plan.steps.map(s => `${s.tool}.${s.action}`);
         }
         
@@ -1476,8 +1499,7 @@ Provide a natural, friendly response. Be concise. Confirm what was done.`;
 router.post('/execute-plan', async (req, res) => {
     try {
         const { email, plan } = req.body;
-        const user = await User.findOne({ email });
-        const connectedPlatforms = getConnectedPlatforms(user);
+        const connectedPlatforms = await getConnectedPlatformsFromDB(email);
         const { results, executionLog } = await executePlan(plan, email, connectedPlatforms);
         res.json({ success: true, results, executionLog });
     } catch (error) {
@@ -1516,13 +1538,13 @@ router.post('/execute', async (req, res) => {
     }
 });
 
-// Get available actions (FIXED - checks both arrays)
+// Get available actions (CRITICAL FIX - use isConnected flag)
 router.get('/actions/:email', async (req, res) => {
     try {
         const { email } = req.params;
-        const user = await User.findOne({ email });
         
-        const connectedPlatforms = getConnectedPlatforms(user);
+        // Get connected platforms using the fixed function
+        const connectedPlatforms = await getConnectedPlatformsFromDB(email);
         
         console.log(`[Actions] ${email} has platforms: ${connectedPlatforms.join(', ') || 'None'}`);
         
