@@ -59,21 +59,42 @@ async function think(prompt, options = {}) {
 }
 
 // ============================================
-// HELPER FUNCTIONS
+// HELPER: GET USER TOKEN (FIXED - checks both arrays)
 // ============================================
 async function getUserToken(email, platform) {
     const user = await User.findOne({ email });
     if (!user) throw new Error('User not found');
     
-    const account = user.connectedAccounts?.find(a => 
-        a.platform?.toLowerCase() === platform.toLowerCase()
-    );
+    const platformLower = platform.toLowerCase();
+    let account = null;
     
-    if (!account) throw new Error(`${platform} not connected`);
+    // Check connectedAccounts array
+    if (user.connectedAccounts && user.connectedAccounts.length > 0) {
+        account = user.connectedAccounts.find(a => 
+            a && a.platform && a.platform.toLowerCase() === platformLower && a.accessToken
+        );
+    }
     
+    // Check connectedOAuthAccounts array (used by oauthRoutes.js)
+    if (!account && user.connectedOAuthAccounts && user.connectedOAuthAccounts.length > 0) {
+        account = user.connectedOAuthAccounts.find(a => 
+            a && a.platform && a.platform.toLowerCase() === platformLower && a.accessToken
+        );
+    }
+    
+    if (!account) {
+        console.log(`[getUserToken] Platform "${platform}" not found for ${email}`);
+        console.log(`[getUserToken] connectedAccounts:`, user.connectedAccounts?.map(a => a?.platform) || []);
+        console.log(`[getUserToken] connectedOAuthAccounts:`, user.connectedOAuthAccounts?.map(a => a?.platform) || []);
+        throw new Error(`${platform} not connected`);
+    }
+    
+    // Check expiry
     if (account.tokenExpiry && new Date(account.tokenExpiry) < new Date()) {
         throw new Error(`${platform} token expired - please reconnect`);
     }
+    
+    console.log(`[getUserToken] Found ${platform} token for ${email}`);
     
     return {
         accessToken: account.accessToken,
@@ -83,6 +104,26 @@ async function getUserToken(email, platform) {
     };
 }
 
+// ============================================
+// HELPER: GET CONNECTED PLATFORMS (FIXED)
+// ============================================
+function getConnectedPlatforms(user) {
+    const allAccounts = [
+        ...(user?.connectedAccounts || []),
+        ...(user?.connectedOAuthAccounts || [])
+    ];
+    
+    const platforms = allAccounts
+        .filter(a => a && a.platform && a.accessToken)
+        .map(a => a.platform.toLowerCase());
+    
+    // Remove duplicates
+    return [...new Set(platforms)];
+}
+
+// ============================================
+// HELPER: GET FULL REPO NAME
+// ============================================
 async function getFullRepoName(accessToken, repoName) {
     if (repoName.includes('/')) return repoName;
     const response = await fetch('https://api.github.com/user', {
@@ -96,9 +137,11 @@ async function getFullRepoName(accessToken, repoName) {
 // AUTONOMOUS TASK PLANNER
 // ============================================
 async function planExecution(userRequest, connectedPlatforms, userContext = {}) {
+    const platformList = connectedPlatforms.length > 0 ? connectedPlatforms.join(', ') : 'None';
+    
     const systemPrompt = `You are an autonomous AI agent planner. Your job is to break down user requests into executable steps.
 
-CONNECTED PLATFORMS: ${connectedPlatforms.join(', ') || 'None'}
+CONNECTED PLATFORMS: ${platformList}
 
 AVAILABLE TOOLS BY PLATFORM:
 
@@ -116,45 +159,34 @@ GITHUB:
 - github.listIssues - List issues (params: repo, state)
 - github.createIssue - Create issue (params: repo, title, body)
 - github.closeIssue - Close issue (params: repo, issueNumber)
-- github.listPullRequests - List PRs (params: repo, state)
 - github.listBranches - List branches (params: repo)
 - github.getRepoStats - Get repo statistics (params: repo)
 - github.searchRepos - Search repositories (params: query)
-- github.searchCode - Search code (params: query)
-- github.forkRepo - Fork repository (params: repo)
-- github.starRepo - Star repository (params: repo)
 ` : ''}
 
 ${connectedPlatforms.includes('google') ? `
 GOOGLE:
 - google.getProfile - Get user profile
-- google.listCalendarEvents - List calendar events (params: maxResults, timeMin)
-- google.createCalendarEvent - Create event (params: summary, description, startTime, endTime, location)
+- google.listCalendarEvents - List calendar events
+- google.createCalendarEvent - Create event (params: summary, startTime, endTime, description)
 - google.deleteCalendarEvent - Delete event (params: eventId)
 - google.listEmails - List emails (params: maxResults, query)
 - google.sendEmail - Send email (params: to, subject, body)
-- google.listDriveFiles - List Drive files (params: query, maxResults)
-- google.createDriveFolder - Create folder (params: name, parentId)
-- google.listContacts - List contacts
+- google.listDriveFiles - List Drive files
+- google.createDriveFolder - Create folder (params: name)
 ` : ''}
 
 ${connectedPlatforms.includes('shopify') ? `
 SHOPIFY:
 - shopify.getShopInfo - Get shop details
-- shopify.getProducts - List products (params: limit)
-- shopify.createProduct - Create product (params: title, description, price, vendor, type, inventory)
+- shopify.getProducts - List products
+- shopify.createProduct - Create product (params: title, description, price, vendor)
 - shopify.updateProduct - Update product (params: productId, updates)
 - shopify.deleteProduct - Delete product (params: productId)
-- shopify.getOrders - List orders (params: status, limit)
-- shopify.getOrderDetails - Get order details (params: orderId)
-- shopify.fulfillOrder - Fulfill order (params: orderId)
-- shopify.getCustomers - List customers (params: limit)
+- shopify.getOrders - List orders
 - shopify.getAnalytics - Get shop analytics
 - shopify.getInventory - Get inventory levels
 - shopify.createDiscount - Create discount (params: code, value, type)
-- shopify.getCollections - List collections
-- shopify.createCollection - Create collection (params: title, description)
-- shopify.getThemes - List themes
 ` : ''}
 
 ${connectedPlatforms.includes('spotify') ? `
@@ -162,159 +194,77 @@ SPOTIFY:
 - spotify.getProfile - Get user profile
 - spotify.getCurrentlyPlaying - Get current track
 - spotify.getTopTracks - Get top tracks (params: timeRange, limit)
-- spotify.getTopArtists - Get top artists (params: timeRange, limit)
+- spotify.getTopArtists - Get top artists
 - spotify.getPlaylists - List playlists
 - spotify.createPlaylist - Create playlist (params: name, description, isPublic)
-- spotify.addToPlaylist - Add tracks to playlist (params: playlistId, trackUris)
-- spotify.removeFromPlaylist - Remove tracks (params: playlistId, trackUris)
-- spotify.playTrack - Play/resume (params: uri)
-- spotify.pauseTrack - Pause playback
-- spotify.nextTrack - Skip to next
-- spotify.previousTrack - Go to previous
-- spotify.setVolume - Set volume (params: volumePercent)
-- spotify.searchTracks - Search tracks (params: query, limit)
-- spotify.searchArtists - Search artists (params: query, limit)
-- spotify.searchAlbums - Search albums (params: query, limit)
-- spotify.getRecentlyPlayed - Get recently played
-- spotify.getSavedTracks - Get liked songs
-- spotify.saveTracks - Like tracks (params: trackIds)
-- spotify.getArtist - Get artist details (params: artistId)
-- spotify.getAlbum - Get album details (params: albumId)
-- spotify.getPlaylistTracks - Get playlist tracks (params: playlistId)
+- spotify.addToPlaylist - Add tracks (params: playlistId, trackUris)
+- spotify.playTrack - Play/resume
+- spotify.pauseTrack - Pause
+- spotify.nextTrack - Next track
+- spotify.previousTrack - Previous track
+- spotify.searchTracks - Search tracks (params: query)
+- spotify.getRecentlyPlayed - Recently played
 ` : ''}
 
 ${connectedPlatforms.includes('notion') ? `
 NOTION:
-- notion.listDatabases - List all databases
+- notion.listDatabases - List databases
 - notion.listPages - List pages
-- notion.getPage - Get page details (params: pageId)
-- notion.createPage - Create page (params: parentId, title, content, properties)
-- notion.updatePage - Update page (params: pageId, properties)
-- notion.deletePage - Archive page (params: pageId)
-- notion.queryDatabase - Query database (params: databaseId, filter, sorts)
-- notion.createDatabase - Create database (params: parentId, title, properties)
+- notion.createPage - Create page (params: parentId, title, content)
 - notion.search - Search Notion (params: query)
-- notion.getBlock - Get block (params: blockId)
-- notion.appendBlocks - Append blocks to page (params: pageId, blocks)
 ` : ''}
 
 ${connectedPlatforms.includes('discord') ? `
 DISCORD:
-- discord.getUser - Get user profile
+- discord.getUser - Get profile
 - discord.getGuilds - List servers
-- discord.getGuildChannels - List channels (params: guildId)
-- discord.getChannel - Get channel details (params: channelId)
-- discord.sendMessage - Send message (params: channelId, content)
-- discord.getMessages - Get messages (params: channelId, limit)
-- discord.createReaction - Add reaction (params: channelId, messageId, emoji)
-- discord.deleteMessage - Delete message (params: channelId, messageId)
 ` : ''}
 
 ${connectedPlatforms.includes('slack') ? `
 SLACK:
-- slack.getProfile - Get user profile
+- slack.getProfile - Get profile
 - slack.listChannels - List channels
-- slack.getChannel - Get channel info (params: channelId)
-- slack.sendMessage - Send message (params: channel, text, blocks)
-- slack.updateMessage - Update message (params: channel, ts, text)
-- slack.deleteMessage - Delete message (params: channel, ts)
+- slack.sendMessage - Send message (params: channel, text)
 - slack.getMessages - Get messages (params: channel, limit)
-- slack.addReaction - Add reaction (params: channel, timestamp, name)
-- slack.listUsers - List workspace users
-- slack.uploadFile - Upload file (params: channels, content, filename)
 ` : ''}
 
 ${connectedPlatforms.includes('twitter') ? `
 TWITTER:
-- twitter.getProfile - Get user profile
-- twitter.getTweets - Get user tweets (params: limit)
+- twitter.getProfile - Get profile
+- twitter.getTweets - Get tweets
 - twitter.postTweet - Post tweet (params: text)
-- twitter.deleteTweet - Delete tweet (params: tweetId)
-- twitter.likeTweet - Like tweet (params: tweetId)
-- twitter.retweet - Retweet (params: tweetId)
-- twitter.getFollowers - Get followers (params: limit)
-- twitter.getFollowing - Get following (params: limit)
-- twitter.searchTweets - Search tweets (params: query, limit)
-` : ''}
-
-${connectedPlatforms.includes('linkedin') ? `
-LINKEDIN:
-- linkedin.getProfile - Get user profile
-- linkedin.getConnections - Get connections
-- linkedin.sharePost - Share post (params: text, visibility)
+- twitter.getFollowers - Get followers
 ` : ''}
 
 ${connectedPlatforms.includes('strava') ? `
 STRAVA:
-- strava.getAthlete - Get athlete profile
-- strava.getActivities - List activities (params: perPage)
-- strava.getActivity - Get activity details (params: activityId)
-- strava.getStats - Get athlete stats
-- strava.getSegmentEfforts - Get segment efforts (params: segmentId)
-- strava.getRoutes - Get routes
+- strava.getAthlete - Get profile
+- strava.getActivities - List activities
+- strava.getStats - Get stats
 ` : ''}
 
 ${connectedPlatforms.includes('dropbox') ? `
 DROPBOX:
 - dropbox.listFiles - List files (params: path)
-- dropbox.getFile - Download file (params: path)
-- dropbox.uploadFile - Upload file (params: path, content)
 - dropbox.createFolder - Create folder (params: path)
-- dropbox.deleteFile - Delete file (params: path)
-- dropbox.moveFile - Move file (params: fromPath, toPath)
-- dropbox.copyFile - Copy file (params: fromPath, toPath)
-- dropbox.getSpaceUsage - Get space usage
+- dropbox.getSpaceUsage - Check storage
 - dropbox.search - Search files (params: query)
-- dropbox.getSharedLinks - Get shared links (params: path)
-- dropbox.createSharedLink - Create shared link (params: path)
 ` : ''}
 
 ${connectedPlatforms.includes('fitbit') ? `
 FITBIT:
-- fitbit.getProfile - Get user profile
-- fitbit.getActivitySummary - Get activity summary (params: date)
-- fitbit.getSleepLog - Get sleep log (params: date)
-- fitbit.getHeartRate - Get heart rate (params: date, period)
-- fitbit.getWeightLog - Get weight log (params: date)
-- fitbit.getWaterLog - Get water log (params: date)
-- fitbit.logWater - Log water (params: amount, date)
-- fitbit.getDevices - Get devices
-- fitbit.getBadges - Get badges
-` : ''}
-
-${connectedPlatforms.includes('asana') ? `
-ASANA:
-- asana.getWorkspaces - Get workspaces
-- asana.getProjects - Get projects (params: workspaceId)
-- asana.getTasks - Get tasks (params: projectId)
-- asana.createTask - Create task (params: projectId, name, notes, dueDate)
-- asana.updateTask - Update task (params: taskId, updates)
-- asana.completeTask - Complete task (params: taskId)
-- asana.deleteTask - Delete task (params: taskId)
-` : ''}
-
-${connectedPlatforms.includes('todoist') ? `
-TODOIST:
-- todoist.getProjects - Get projects
-- todoist.getTasks - Get tasks (params: projectId)
-- todoist.createTask - Create task (params: content, projectId, dueDate, priority)
-- todoist.updateTask - Update task (params: taskId, updates)
-- todoist.completeTask - Complete task (params: taskId)
-- todoist.deleteTask - Delete task (params: taskId)
-- todoist.createProject - Create project (params: name)
+- fitbit.getProfile - Get profile
+- fitbit.getActivitySummary - Activity summary
+- fitbit.getSleepLog - Sleep data
+- fitbit.getHeartRate - Heart rate
 ` : ''}
 
 AI TOOLS (always available):
-- ai.generateCode - Generate code (params: description, language, context)
-- ai.generateProject - Generate full project structure (params: name, type, description)
+- ai.generateCode - Generate code (params: description, language)
+- ai.generateProject - Generate project structure (params: name, type, description)
 - ai.analyzeData - Analyze data (params: data, question)
 - ai.summarize - Summarize text (params: text, maxLength)
 - ai.translate - Translate text (params: text, targetLanguage)
-- ai.explain - Explain concept (params: topic, level)
-- ai.writeContent - Write content (params: type, topic, tone, length)
-- ai.refactorCode - Refactor code (params: code, language, improvements)
-- ai.reviewCode - Review code (params: code, language)
-- ai.generateTests - Generate tests (params: code, language, framework)
 
 USER CONTEXT:
 - Name: ${userContext.userName || 'User'}
@@ -323,12 +273,12 @@ USER CONTEXT:
 RULES FOR PLANNING:
 1. Break complex requests into simple, sequential steps
 2. Each step should use ONE tool/action
-3. Reference previous step results with $step1, $step2, etc. (e.g., $step1.name, $step1.id)
-4. If a required platform is not connected, mark canComplete as false
+3. Reference previous step results with $step1, $step2, etc. (e.g., $step1.name, $step1.fullName)
+4. If a required platform is not connected, mark canComplete as false and list it in missingPlatforms
 5. Extract specific values from the request (names, descriptions, settings)
-6. For code/project generation: first use ai.generateCode, then github.createFile
+6. For code generation + file creation: first use ai.generateCode, then github.createFile with $step1.content
 7. Be proactive - if user wants a repo with files, plan both repo creation AND file creation
-8. Estimate realistic times for each step
+8. For private repos, set isPrivate: true in params
 
 RESPONSE FORMAT (JSON only):
 {
@@ -342,12 +292,10 @@ RESPONSE FORMAT (JSON only):
             "tool": "platform",
             "action": "actionName",
             "params": { "key": "value" },
-            "dependsOn": null,
-            "estimatedSeconds": 2
+            "dependsOn": null
         }
     ],
     "summary": "What will be accomplished",
-    "totalEstimatedSeconds": 10,
     "warnings": []
 }`;
 
@@ -377,18 +325,25 @@ const tools = {
             });
             if (!response.ok) throw new Error('Failed to fetch user');
             const user = await response.json();
-            return { login: user.login, name: user.name, email: user.email, bio: user.bio, followers: user.followers, following: user.following, publicRepos: user.public_repos, avatarUrl: user.avatar_url };
+            return { login: user.login, name: user.name, email: user.email, bio: user.bio, followers: user.followers, publicRepos: user.public_repos };
         },
 
         async createRepo(token, params) {
+            console.log('[GitHub] Creating repo:', params.name, 'Private:', params.isPrivate);
             const response = await fetch('https://api.github.com/user/repos', {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${token.accessToken}`, 'Accept': 'application/vnd.github.v3+json', 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name: params.name, description: params.description || '', private: params.isPrivate === true || params.isPrivate === 'true', auto_init: true })
+                body: JSON.stringify({ 
+                    name: params.name, 
+                    description: params.description || '', 
+                    private: params.isPrivate === true || params.isPrivate === 'true' || params.private === true,
+                    auto_init: true 
+                })
             });
             const data = await response.json();
-            if (data.errors || data.message) throw new Error(data.errors?.[0]?.message || data.message || 'Failed to create repo');
-            return { name: data.name, fullName: data.full_name, url: data.html_url, private: data.private, description: data.description };
+            if (!response.ok) throw new Error(data.message || 'Failed to create repo');
+            console.log('[GitHub] Repo created:', data.full_name);
+            return { name: data.name, fullName: data.full_name, url: data.html_url, private: data.private };
         },
 
         async deleteRepo(token, params) {
@@ -410,7 +365,7 @@ const tools = {
             if (!response.ok) throw new Error('Failed to list files');
             const data = await response.json();
             const items = Array.isArray(data) ? data : [data];
-            return items.map(item => ({ name: item.name, path: item.path, type: item.type, size: item.size, sha: item.sha, url: item.html_url, downloadUrl: item.download_url }));
+            return items.map(item => ({ name: item.name, path: item.path, type: item.type, size: item.size, url: item.html_url }));
         },
 
         async getFileContent(token, params) {
@@ -420,18 +375,28 @@ const tools = {
             });
             if (!response.ok) throw new Error('File not found');
             const data = await response.json();
-            return { name: data.name, path: data.path, sha: data.sha, size: data.size, content: Buffer.from(data.content, 'base64').toString('utf-8'), url: data.html_url };
+            return { name: data.name, path: data.path, sha: data.sha, content: Buffer.from(data.content, 'base64').toString('utf-8'), url: data.html_url };
         },
 
         async createFile(token, params) {
             const fullName = await getFullRepoName(token.accessToken, params.repo);
+            console.log('[GitHub] Creating file:', params.path, 'in', fullName);
+            
+            // Wait a moment for repo to be fully initialized
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            const content = params.content || '';
             const response = await fetch(`https://api.github.com/repos/${fullName}/contents/${params.path}`, {
                 method: 'PUT',
                 headers: { 'Authorization': `Bearer ${token.accessToken}`, 'Accept': 'application/vnd.github.v3+json', 'Content-Type': 'application/json' },
-                body: JSON.stringify({ message: params.message || `Create ${params.path}`, content: Buffer.from(params.content || '').toString('base64') })
+                body: JSON.stringify({ 
+                    message: params.message || `Create ${params.path}`, 
+                    content: Buffer.from(content).toString('base64') 
+                })
             });
             const data = await response.json();
             if (!response.ok) throw new Error(data.message || 'Failed to create file');
+            console.log('[GitHub] File created:', data.content?.path);
             return { success: true, path: data.content?.path, sha: data.content?.sha, url: data.content?.html_url };
         },
 
@@ -447,7 +412,7 @@ const tools = {
                         const currentFile = await getResponse.json();
                         sha = currentFile.sha;
                     }
-                } catch (e) { /* File doesn't exist, will create */ }
+                } catch (e) { /* File doesn't exist */ }
             }
             const body = { message: params.message || `Update ${params.path}`, content: Buffer.from(params.content || '').toString('base64') };
             if (sha) body.sha = sha;
@@ -458,7 +423,7 @@ const tools = {
             });
             const data = await response.json();
             if (!response.ok) throw new Error(data.message || 'Failed to update file');
-            return { success: true, path: data.content?.path, sha: data.content?.sha, url: data.content?.html_url };
+            return { success: true, path: data.content?.path, url: data.content?.html_url };
         },
 
         async deleteFile(token, params) {
@@ -479,13 +444,12 @@ const tools = {
 
         async listIssues(token, params) {
             const fullName = await getFullRepoName(token.accessToken, params.repo);
-            const state = params.state || 'open';
-            const response = await fetch(`https://api.github.com/repos/${fullName}/issues?state=${state}&per_page=30`, {
+            const response = await fetch(`https://api.github.com/repos/${fullName}/issues?state=${params.state || 'open'}&per_page=30`, {
                 headers: { 'Authorization': `Bearer ${token.accessToken}`, 'Accept': 'application/vnd.github.v3+json' }
             });
             if (!response.ok) throw new Error('Failed to fetch issues');
             const issues = await response.json();
-            return issues.map(i => ({ number: i.number, title: i.title, state: i.state, body: i.body?.slice(0, 200), author: i.user?.login, labels: i.labels?.map(l => l.name), url: i.html_url, createdAt: i.created_at }));
+            return issues.map(i => ({ number: i.number, title: i.title, state: i.state, author: i.user?.login, url: i.html_url }));
         },
 
         async createIssue(token, params) {
@@ -493,7 +457,7 @@ const tools = {
             const response = await fetch(`https://api.github.com/repos/${fullName}/issues`, {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${token.accessToken}`, 'Accept': 'application/vnd.github.v3+json', 'Content-Type': 'application/json' },
-                body: JSON.stringify({ title: params.title, body: params.body || '', labels: params.labels || [] })
+                body: JSON.stringify({ title: params.title, body: params.body || '' })
             });
             if (!response.ok) throw new Error('Failed to create issue');
             const data = await response.json();
@@ -512,17 +476,6 @@ const tools = {
             return { number: data.number, state: data.state };
         },
 
-        async listPullRequests(token, params) {
-            const fullName = await getFullRepoName(token.accessToken, params.repo);
-            const state = params.state || 'open';
-            const response = await fetch(`https://api.github.com/repos/${fullName}/pulls?state=${state}`, {
-                headers: { 'Authorization': `Bearer ${token.accessToken}`, 'Accept': 'application/vnd.github.v3+json' }
-            });
-            if (!response.ok) throw new Error('Failed to fetch PRs');
-            const prs = await response.json();
-            return prs.map(pr => ({ number: pr.number, title: pr.title, state: pr.state, author: pr.user?.login, head: pr.head?.ref, base: pr.base?.ref, url: pr.html_url }));
-        },
-
         async listBranches(token, params) {
             const fullName = await getFullRepoName(token.accessToken, params.repo);
             const response = await fetch(`https://api.github.com/repos/${fullName}/branches`, {
@@ -530,26 +483,17 @@ const tools = {
             });
             if (!response.ok) throw new Error('Failed to fetch branches');
             const branches = await response.json();
-            return branches.map(b => ({ name: b.name, protected: b.protected, sha: b.commit?.sha }));
+            return branches.map(b => ({ name: b.name, protected: b.protected }));
         },
 
         async getRepoStats(token, params) {
             const fullName = await getFullRepoName(token.accessToken, params.repo);
-            const [repoRes, commitsRes, contribRes] = await Promise.all([
-                fetch(`https://api.github.com/repos/${fullName}`, { headers: { 'Authorization': `Bearer ${token.accessToken}`, 'Accept': 'application/vnd.github.v3+json' } }),
-                fetch(`https://api.github.com/repos/${fullName}/commits?per_page=10`, { headers: { 'Authorization': `Bearer ${token.accessToken}`, 'Accept': 'application/vnd.github.v3+json' } }),
-                fetch(`https://api.github.com/repos/${fullName}/contributors?per_page=5`, { headers: { 'Authorization': `Bearer ${token.accessToken}`, 'Accept': 'application/vnd.github.v3+json' } })
-            ]);
-            const repo = await repoRes.json();
-            const commits = await commitsRes.json();
-            const contributors = await contribRes.json();
-            return {
-                name: repo.name, fullName: repo.full_name, description: repo.description, language: repo.language,
-                stars: repo.stargazers_count, forks: repo.forks_count, watchers: repo.watchers_count, openIssues: repo.open_issues_count,
-                size: repo.size, defaultBranch: repo.default_branch, createdAt: repo.created_at, updatedAt: repo.updated_at,
-                recentCommits: (Array.isArray(commits) ? commits : []).slice(0, 5).map(c => ({ message: c.commit?.message?.split('\n')[0], author: c.commit?.author?.name, date: c.commit?.author?.date })),
-                topContributors: (Array.isArray(contributors) ? contributors : []).slice(0, 5).map(c => ({ login: c.login, contributions: c.contributions }))
-            };
+            const response = await fetch(`https://api.github.com/repos/${fullName}`, {
+                headers: { 'Authorization': `Bearer ${token.accessToken}`, 'Accept': 'application/vnd.github.v3+json' }
+            });
+            if (!response.ok) throw new Error('Failed to fetch repo');
+            const repo = await response.json();
+            return { name: repo.name, fullName: repo.full_name, description: repo.description, language: repo.language, stars: repo.stargazers_count, forks: repo.forks_count, openIssues: repo.open_issues_count };
         },
 
         async searchRepos(token, params) {
@@ -558,40 +502,12 @@ const tools = {
             });
             if (!response.ok) throw new Error('Search failed');
             const data = await response.json();
-            return data.items?.map(r => ({ name: r.name, fullName: r.full_name, description: r.description, url: r.html_url, stars: r.stargazers_count, language: r.language })) || [];
-        },
-
-        async searchCode(token, params) {
-            const response = await fetch(`https://api.github.com/search/code?q=${encodeURIComponent(params.query)}&per_page=10`, {
-                headers: { 'Authorization': `Bearer ${token.accessToken}`, 'Accept': 'application/vnd.github.v3+json' }
-            });
-            if (!response.ok) throw new Error('Search failed');
-            const data = await response.json();
-            return data.items?.map(i => ({ name: i.name, path: i.path, repo: i.repository?.full_name, url: i.html_url })) || [];
-        },
-
-        async forkRepo(token, params) {
-            const response = await fetch(`https://api.github.com/repos/${params.repo}/forks`, {
-                method: 'POST',
-                headers: { 'Authorization': `Bearer ${token.accessToken}`, 'Accept': 'application/vnd.github.v3+json' }
-            });
-            if (!response.ok) throw new Error('Failed to fork');
-            const data = await response.json();
-            return { name: data.name, fullName: data.full_name, url: data.html_url };
-        },
-
-        async starRepo(token, params) {
-            const response = await fetch(`https://api.github.com/user/starred/${params.repo}`, {
-                method: 'PUT',
-                headers: { 'Authorization': `Bearer ${token.accessToken}`, 'Accept': 'application/vnd.github.v3+json', 'Content-Length': '0' }
-            });
-            if (!response.ok && response.status !== 204) throw new Error('Failed to star');
-            return { success: true, starred: params.repo };
+            return data.items?.map(r => ({ name: r.name, fullName: r.full_name, description: r.description, url: r.html_url, stars: r.stargazers_count })) || [];
         }
     },
 
     // ============================================
-    // TOOL IMPLEMENTATIONS - GOOGLE
+    // GOOGLE
     // ============================================
     google: {
         async getProfile(token) {
@@ -603,37 +519,30 @@ const tools = {
         },
 
         async listCalendarEvents(token, params = {}) {
-            const maxResults = params.maxResults || 10;
             const timeMin = params.timeMin || new Date().toISOString();
             const response = await fetch(
-                `https://www.googleapis.com/calendar/v3/calendars/primary/events?maxResults=${maxResults}&timeMin=${encodeURIComponent(timeMin)}&singleEvents=true&orderBy=startTime`,
+                `https://www.googleapis.com/calendar/v3/calendars/primary/events?maxResults=${params.maxResults || 10}&timeMin=${encodeURIComponent(timeMin)}&singleEvents=true&orderBy=startTime`,
                 { headers: { 'Authorization': `Bearer ${token.accessToken}` } }
             );
             if (!response.ok) throw new Error('Failed to fetch events');
             const data = await response.json();
-            return (data.items || []).map(e => ({
-                id: e.id, title: e.summary, description: e.description,
-                start: e.start?.dateTime || e.start?.date, end: e.end?.dateTime || e.end?.date,
-                location: e.location, url: e.htmlLink
-            }));
+            return (data.items || []).map(e => ({ id: e.id, title: e.summary, start: e.start?.dateTime || e.start?.date, end: e.end?.dateTime || e.end?.date, location: e.location }));
         },
 
         async createCalendarEvent(token, params) {
-            const event = {
-                summary: params.summary || params.title,
-                description: params.description || '',
-                location: params.location || '',
-                start: { dateTime: params.startTime, timeZone: params.timeZone || 'UTC' },
-                end: { dateTime: params.endTime, timeZone: params.timeZone || 'UTC' }
-            };
             const response = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${token.accessToken}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify(event)
+                body: JSON.stringify({
+                    summary: params.summary || params.title,
+                    description: params.description || '',
+                    start: { dateTime: params.startTime, timeZone: 'UTC' },
+                    end: { dateTime: params.endTime, timeZone: 'UTC' }
+                })
             });
             if (!response.ok) throw new Error('Failed to create event');
             const data = await response.json();
-            return { id: data.id, title: data.summary, url: data.htmlLink, start: data.start?.dateTime };
+            return { id: data.id, title: data.summary, url: data.htmlLink };
         },
 
         async deleteCalendarEvent(token, params) {
@@ -646,30 +555,13 @@ const tools = {
         },
 
         async listEmails(token, params = {}) {
-            const maxResults = params.maxResults || 10;
-            const query = params.query ? `&q=${encodeURIComponent(params.query)}` : '';
             const response = await fetch(
-                `https://www.googleapis.com/gmail/v1/users/me/messages?maxResults=${maxResults}${query}`,
+                `https://www.googleapis.com/gmail/v1/users/me/messages?maxResults=${params.maxResults || 10}`,
                 { headers: { 'Authorization': `Bearer ${token.accessToken}` } }
             );
             if (!response.ok) throw new Error('Failed to fetch emails');
             const data = await response.json();
-            
-            const emails = await Promise.all((data.messages || []).slice(0, 5).map(async (msg) => {
-                const detail = await fetch(`https://www.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`, {
-                    headers: { 'Authorization': `Bearer ${token.accessToken}` }
-                });
-                const emailData = await detail.json();
-                const headers = emailData.payload?.headers || [];
-                return {
-                    id: msg.id,
-                    from: headers.find(h => h.name === 'From')?.value,
-                    subject: headers.find(h => h.name === 'Subject')?.value,
-                    date: headers.find(h => h.name === 'Date')?.value,
-                    snippet: emailData.snippet
-                };
-            }));
-            return emails;
+            return data.messages || [];
         },
 
         async sendEmail(token, params) {
@@ -682,14 +574,12 @@ const tools = {
             });
             if (!response.ok) throw new Error('Failed to send email');
             const data = await response.json();
-            return { success: true, messageId: data.id, threadId: data.threadId };
+            return { success: true, messageId: data.id };
         },
 
         async listDriveFiles(token, params = {}) {
-            const maxResults = params.maxResults || 20;
-            const query = params.query ? `&q=${encodeURIComponent(params.query)}` : '';
             const response = await fetch(
-                `https://www.googleapis.com/drive/v3/files?pageSize=${maxResults}${query}&fields=files(id,name,mimeType,size,modifiedTime,webViewLink,iconLink)`,
+                `https://www.googleapis.com/drive/v3/files?pageSize=${params.maxResults || 20}&fields=files(id,name,mimeType,size,webViewLink)`,
                 { headers: { 'Authorization': `Bearer ${token.accessToken}` } }
             );
             if (!response.ok) throw new Error('Failed to fetch files');
@@ -698,37 +588,18 @@ const tools = {
         },
 
         async createDriveFolder(token, params) {
-            const metadata = {
-                name: params.name,
-                mimeType: 'application/vnd.google-apps.folder',
-                ...(params.parentId && { parents: [params.parentId] })
-            };
             const response = await fetch('https://www.googleapis.com/drive/v3/files', {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${token.accessToken}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify(metadata)
+                body: JSON.stringify({ name: params.name, mimeType: 'application/vnd.google-apps.folder' })
             });
             if (!response.ok) throw new Error('Failed to create folder');
             return await response.json();
-        },
-
-        async listContacts(token) {
-            const response = await fetch(
-                'https://people.googleapis.com/v1/people/me/connections?personFields=names,emailAddresses,phoneNumbers&pageSize=50',
-                { headers: { 'Authorization': `Bearer ${token.accessToken}` } }
-            );
-            if (!response.ok) throw new Error('Failed to fetch contacts');
-            const data = await response.json();
-            return (data.connections || []).map(c => ({
-                name: c.names?.[0]?.displayName,
-                email: c.emailAddresses?.[0]?.value,
-                phone: c.phoneNumbers?.[0]?.value
-            }));
         }
     },
 
     // ============================================
-    // TOOL IMPLEMENTATIONS - SHOPIFY
+    // SHOPIFY
     // ============================================
     shopify: {
         async getShopInfo(token) {
@@ -741,37 +612,31 @@ const tools = {
         },
 
         async getProducts(token, params = {}) {
-            const limit = params.limit || 50;
-            const response = await fetch(`https://${token.shopDomain}/admin/api/2024-01/products.json?limit=${limit}`, {
+            const response = await fetch(`https://${token.shopDomain}/admin/api/2024-01/products.json?limit=${params.limit || 50}`, {
                 headers: { 'X-Shopify-Access-Token': token.accessToken }
             });
             if (!response.ok) throw new Error('Failed to fetch products');
             const data = await response.json();
             return (data.products || []).map(p => ({
-                id: p.id, title: p.title, description: p.body_html, vendor: p.vendor, type: p.product_type,
-                status: p.status, price: p.variants?.[0]?.price,
-                inventory: p.variants?.reduce((sum, v) => sum + (v.inventory_quantity || 0), 0),
-                images: p.images?.length || 0, createdAt: p.created_at
+                id: p.id, title: p.title, vendor: p.vendor, status: p.status,
+                price: p.variants?.[0]?.price, inventory: p.variants?.reduce((s, v) => s + (v.inventory_quantity || 0), 0)
             }));
         },
 
         async createProduct(token, params) {
-            const product = {
-                title: params.title,
-                body_html: params.description || '',
-                vendor: params.vendor || '',
-                product_type: params.type || '',
-                status: params.status || 'draft',
-                variants: [{ price: params.price || '0.00', inventory_quantity: params.inventory || 0, inventory_management: 'shopify' }]
-            };
             const response = await fetch(`https://${token.shopDomain}/admin/api/2024-01/products.json`, {
                 method: 'POST',
                 headers: { 'X-Shopify-Access-Token': token.accessToken, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ product })
+                body: JSON.stringify({
+                    product: {
+                        title: params.title, body_html: params.description || '', vendor: params.vendor || '',
+                        status: 'draft', variants: [{ price: params.price || '0.00', inventory_quantity: params.inventory || 0 }]
+                    }
+                })
             });
             if (!response.ok) throw new Error('Failed to create product');
             const data = await response.json();
-            return { id: data.product.id, title: data.product.title, status: data.product.status };
+            return { id: data.product.id, title: data.product.title };
         },
 
         async updateProduct(token, params) {
@@ -795,68 +660,25 @@ const tools = {
         },
 
         async getOrders(token, params = {}) {
-            const limit = params.limit || 50;
-            const status = params.status || 'any';
-            const response = await fetch(`https://${token.shopDomain}/admin/api/2024-01/orders.json?limit=${limit}&status=${status}`, {
+            const response = await fetch(`https://${token.shopDomain}/admin/api/2024-01/orders.json?limit=${params.limit || 50}&status=any`, {
                 headers: { 'X-Shopify-Access-Token': token.accessToken }
             });
             if (!response.ok) throw new Error('Failed to fetch orders');
             const data = await response.json();
             return (data.orders || []).map(o => ({
-                id: o.id, orderNumber: o.order_number, totalPrice: o.total_price, subtotal: o.subtotal_price,
-                currency: o.currency, status: o.financial_status, fulfillment: o.fulfillment_status || 'unfulfilled',
-                customer: o.customer?.email || 'Guest', itemCount: o.line_items?.length || 0, createdAt: o.created_at
-            }));
-        },
-
-        async getOrderDetails(token, params) {
-            const response = await fetch(`https://${token.shopDomain}/admin/api/2024-01/orders/${params.orderId}.json`, {
-                headers: { 'X-Shopify-Access-Token': token.accessToken }
-            });
-            if (!response.ok) throw new Error('Failed to fetch order');
-            const data = await response.json();
-            return data.order;
-        },
-
-        async fulfillOrder(token, params) {
-            const response = await fetch(`https://${token.shopDomain}/admin/api/2024-01/orders/${params.orderId}/fulfillments.json`, {
-                method: 'POST',
-                headers: { 'X-Shopify-Access-Token': token.accessToken, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ fulfillment: { notify_customer: true } })
-            });
-            if (!response.ok) throw new Error('Failed to fulfill order');
-            return await response.json();
-        },
-
-        async getCustomers(token, params = {}) {
-            const limit = params.limit || 50;
-            const response = await fetch(`https://${token.shopDomain}/admin/api/2024-01/customers.json?limit=${limit}`, {
-                headers: { 'X-Shopify-Access-Token': token.accessToken }
-            });
-            if (!response.ok) throw new Error('Failed to fetch customers');
-            const data = await response.json();
-            return (data.customers || []).map(c => ({
-                id: c.id, email: c.email, name: `${c.first_name || ''} ${c.last_name || ''}`.trim(),
-                ordersCount: c.orders_count, totalSpent: c.total_spent, createdAt: c.created_at
+                id: o.id, orderNumber: o.order_number, totalPrice: o.total_price,
+                status: o.financial_status, customer: o.customer?.email
             }));
         },
 
         async getAnalytics(token) {
-            const [ordersRes, productsRes, customersRes] = await Promise.all([
-                this.getOrders(token, { limit: 250 }),
-                this.getProducts(token, { limit: 250 }),
-                this.getCustomers(token, { limit: 250 })
-            ]);
-            const totalRevenue = ordersRes.reduce((sum, o) => sum + parseFloat(o.totalPrice || 0), 0);
-            const paidOrders = ordersRes.filter(o => o.status === 'paid');
-            const today = new Date().toISOString().split('T')[0];
-            const todayOrders = ordersRes.filter(o => o.createdAt?.startsWith(today));
+            const orders = await this.getOrders(token, { limit: 250 });
+            const products = await this.getProducts(token, { limit: 250 });
+            const totalRevenue = orders.reduce((s, o) => s + parseFloat(o.totalPrice || 0), 0);
             return {
-                totalOrders: ordersRes.length, totalRevenue: totalRevenue.toFixed(2),
-                averageOrderValue: ordersRes.length ? (totalRevenue / ordersRes.length).toFixed(2) : '0.00',
-                paidOrders: paidOrders.length, pendingOrders: ordersRes.filter(o => o.status === 'pending').length,
-                totalProducts: productsRes.length, totalCustomers: customersRes.length,
-                todayOrders: todayOrders.length, todayRevenue: todayOrders.reduce((sum, o) => sum + parseFloat(o.totalPrice || 0), 0).toFixed(2)
+                totalOrders: orders.length, totalRevenue: totalRevenue.toFixed(2),
+                averageOrderValue: orders.length ? (totalRevenue / orders.length).toFixed(2) : '0.00',
+                totalProducts: products.length
             };
         },
 
@@ -864,67 +686,34 @@ const tools = {
             const products = await this.getProducts(token, { limit: 250 });
             const lowStock = products.filter(p => (p.inventory || 0) > 0 && (p.inventory || 0) < 10);
             const outOfStock = products.filter(p => (p.inventory || 0) === 0);
-            return {
-                totalProducts: products.length,
-                lowStockCount: lowStock.length, outOfStockCount: outOfStock.length,
-                lowStockItems: lowStock.slice(0, 10).map(p => ({ title: p.title, inventory: p.inventory })),
-                outOfStockItems: outOfStock.slice(0, 10).map(p => p.title)
-            };
+            return { totalProducts: products.length, lowStockCount: lowStock.length, outOfStockCount: outOfStock.length };
         },
 
         async createDiscount(token, params) {
-            const priceRule = {
-                title: params.code, target_type: 'line_item', target_selection: 'all',
-                allocation_method: 'across', value_type: params.type || 'percentage',
-                value: `-${params.value}`, customer_selection: 'all', starts_at: new Date().toISOString()
-            };
             const priceRuleRes = await fetch(`https://${token.shopDomain}/admin/api/2024-01/price_rules.json`, {
                 method: 'POST',
                 headers: { 'X-Shopify-Access-Token': token.accessToken, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ price_rule: priceRule })
+                body: JSON.stringify({
+                    price_rule: {
+                        title: params.code, target_type: 'line_item', target_selection: 'all',
+                        allocation_method: 'across', value_type: params.type || 'percentage',
+                        value: `-${params.value}`, customer_selection: 'all', starts_at: new Date().toISOString()
+                    }
+                })
             });
-            if (!priceRuleRes.ok) throw new Error('Failed to create price rule');
+            if (!priceRuleRes.ok) throw new Error('Failed to create discount');
             const priceRuleData = await priceRuleRes.json();
-            
             await fetch(`https://${token.shopDomain}/admin/api/2024-01/price_rules/${priceRuleData.price_rule.id}/discount_codes.json`, {
                 method: 'POST',
                 headers: { 'X-Shopify-Access-Token': token.accessToken, 'Content-Type': 'application/json' },
                 body: JSON.stringify({ discount_code: { code: params.code } })
             });
-            return { success: true, code: params.code, type: params.type || 'percentage', value: params.value };
-        },
-
-        async getCollections(token) {
-            const response = await fetch(`https://${token.shopDomain}/admin/api/2024-01/custom_collections.json`, {
-                headers: { 'X-Shopify-Access-Token': token.accessToken }
-            });
-            if (!response.ok) throw new Error('Failed to fetch collections');
-            const data = await response.json();
-            return data.custom_collections || [];
-        },
-
-        async createCollection(token, params) {
-            const response = await fetch(`https://${token.shopDomain}/admin/api/2024-01/custom_collections.json`, {
-                method: 'POST',
-                headers: { 'X-Shopify-Access-Token': token.accessToken, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ custom_collection: { title: params.title, body_html: params.description || '' } })
-            });
-            if (!response.ok) throw new Error('Failed to create collection');
-            return await response.json();
-        },
-
-        async getThemes(token) {
-            const response = await fetch(`https://${token.shopDomain}/admin/api/2024-01/themes.json`, {
-                headers: { 'X-Shopify-Access-Token': token.accessToken }
-            });
-            if (!response.ok) throw new Error('Failed to fetch themes');
-            const data = await response.json();
-            return (data.themes || []).map(t => ({ id: t.id, name: t.name, role: t.role }));
+            return { success: true, code: params.code };
         }
     },
 
     // ============================================
-    // TOOL IMPLEMENTATIONS - SPOTIFY
+    // SPOTIFY
     // ============================================
     spotify: {
         async getProfile(token) {
@@ -932,64 +721,44 @@ const tools = {
                 headers: { 'Authorization': `Bearer ${token.accessToken}` }
             });
             if (!response.ok) throw new Error('Failed to fetch profile');
-            const data = await response.json();
-            return { id: data.id, name: data.display_name, email: data.email, followers: data.followers?.total, country: data.country, product: data.product };
+            return await response.json();
         },
 
         async getCurrentlyPlaying(token) {
             const response = await fetch('https://api.spotify.com/v1/me/player/currently-playing', {
                 headers: { 'Authorization': `Bearer ${token.accessToken}` }
             });
-            if (response.status === 204) return { playing: false, message: 'Nothing currently playing' };
+            if (response.status === 204) return { playing: false, message: 'Nothing playing' };
             if (!response.ok) throw new Error('Failed to fetch');
             const data = await response.json();
-            return {
-                playing: data.is_playing, track: data.item?.name,
-                artist: data.item?.artists?.map(a => a.name).join(', '),
-                album: data.item?.album?.name, progress: data.progress_ms, duration: data.item?.duration_ms,
-                uri: data.item?.uri, url: data.item?.external_urls?.spotify
-            };
+            return { playing: data.is_playing, track: data.item?.name, artist: data.item?.artists?.map(a => a.name).join(', '), album: data.item?.album?.name };
         },
 
         async getTopTracks(token, params = {}) {
-            const timeRange = params.timeRange || 'medium_term';
-            const limit = params.limit || 20;
-            const response = await fetch(`https://api.spotify.com/v1/me/top/tracks?time_range=${timeRange}&limit=${limit}`, {
+            const response = await fetch(`https://api.spotify.com/v1/me/top/tracks?time_range=${params.timeRange || 'medium_term'}&limit=${params.limit || 20}`, {
                 headers: { 'Authorization': `Bearer ${token.accessToken}` }
             });
-            if (!response.ok) throw new Error('Failed to fetch top tracks');
+            if (!response.ok) throw new Error('Failed to fetch');
             const data = await response.json();
-            return (data.items || []).map((t, i) => ({
-                rank: i + 1, name: t.name, artist: t.artists?.map(a => a.name).join(', '),
-                album: t.album?.name, uri: t.uri, url: t.external_urls?.spotify
-            }));
+            return (data.items || []).map((t, i) => ({ rank: i + 1, name: t.name, artist: t.artists?.map(a => a.name).join(', '), uri: t.uri }));
         },
 
         async getTopArtists(token, params = {}) {
-            const timeRange = params.timeRange || 'medium_term';
-            const limit = params.limit || 20;
-            const response = await fetch(`https://api.spotify.com/v1/me/top/artists?time_range=${timeRange}&limit=${limit}`, {
+            const response = await fetch(`https://api.spotify.com/v1/me/top/artists?time_range=${params.timeRange || 'medium_term'}&limit=${params.limit || 20}`, {
                 headers: { 'Authorization': `Bearer ${token.accessToken}` }
             });
-            if (!response.ok) throw new Error('Failed to fetch top artists');
+            if (!response.ok) throw new Error('Failed to fetch');
             const data = await response.json();
-            return (data.items || []).map((a, i) => ({
-                rank: i + 1, name: a.name, genres: a.genres?.slice(0, 3),
-                followers: a.followers?.total, uri: a.uri, url: a.external_urls?.spotify
-            }));
+            return (data.items || []).map((a, i) => ({ rank: i + 1, name: a.name, genres: a.genres?.slice(0, 3), followers: a.followers?.total }));
         },
 
-        async getPlaylists(token, params = {}) {
-            const limit = params.limit || 50;
-            const response = await fetch(`https://api.spotify.com/v1/me/playlists?limit=${limit}`, {
+        async getPlaylists(token) {
+            const response = await fetch('https://api.spotify.com/v1/me/playlists?limit=50', {
                 headers: { 'Authorization': `Bearer ${token.accessToken}` }
             });
-            if (!response.ok) throw new Error('Failed to fetch playlists');
+            if (!response.ok) throw new Error('Failed to fetch');
             const data = await response.json();
-            return (data.items || []).map(p => ({
-                id: p.id, name: p.name, description: p.description, tracks: p.tracks?.total,
-                public: p.public, collaborative: p.collaborative, uri: p.uri, url: p.external_urls?.spotify
-            }));
+            return (data.items || []).map(p => ({ id: p.id, name: p.name, tracks: p.tracks?.total, public: p.public }));
         },
 
         async createPlaylist(token, params) {
@@ -1001,7 +770,7 @@ const tools = {
             });
             if (!response.ok) throw new Error('Failed to create playlist');
             const data = await response.json();
-            return { id: data.id, name: data.name, url: data.external_urls?.spotify, uri: data.uri };
+            return { id: data.id, name: data.name, url: data.external_urls?.spotify };
         },
 
         async addToPlaylist(token, params) {
@@ -1017,107 +786,59 @@ const tools = {
 
         async playTrack(token, params = {}) {
             const body = params.uri ? { uris: [params.uri] } : {};
-            const response = await fetch('https://api.spotify.com/v1/me/player/play', {
+            await fetch('https://api.spotify.com/v1/me/player/play', {
                 method: 'PUT',
                 headers: { 'Authorization': `Bearer ${token.accessToken}`, 'Content-Type': 'application/json' },
                 body: Object.keys(body).length ? JSON.stringify(body) : undefined
             });
-            if (!response.ok && response.status !== 204) throw new Error('Failed to play');
             return { success: true, action: 'play' };
         },
 
         async pauseTrack(token) {
-            const response = await fetch('https://api.spotify.com/v1/me/player/pause', {
+            await fetch('https://api.spotify.com/v1/me/player/pause', {
                 method: 'PUT',
                 headers: { 'Authorization': `Bearer ${token.accessToken}` }
             });
-            if (!response.ok && response.status !== 204) throw new Error('Failed to pause');
             return { success: true, action: 'pause' };
         },
 
         async nextTrack(token) {
-            const response = await fetch('https://api.spotify.com/v1/me/player/next', {
+            await fetch('https://api.spotify.com/v1/me/player/next', {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${token.accessToken}` }
             });
-            if (!response.ok && response.status !== 204) throw new Error('Failed to skip');
             return { success: true, action: 'next' };
         },
 
         async previousTrack(token) {
-            const response = await fetch('https://api.spotify.com/v1/me/player/previous', {
+            await fetch('https://api.spotify.com/v1/me/player/previous', {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${token.accessToken}` }
             });
-            if (!response.ok && response.status !== 204) throw new Error('Failed');
             return { success: true, action: 'previous' };
         },
 
-        async setVolume(token, params) {
-            const volume = Math.min(100, Math.max(0, params.volumePercent || 50));
-            const response = await fetch(`https://api.spotify.com/v1/me/player/volume?volume_percent=${volume}`, {
-                method: 'PUT',
-                headers: { 'Authorization': `Bearer ${token.accessToken}` }
-            });
-            if (!response.ok && response.status !== 204) throw new Error('Failed to set volume');
-            return { success: true, volume };
-        },
-
         async searchTracks(token, params) {
-            const limit = params.limit || 10;
-            const response = await fetch(`https://api.spotify.com/v1/search?q=${encodeURIComponent(params.query)}&type=track&limit=${limit}`, {
+            const response = await fetch(`https://api.spotify.com/v1/search?q=${encodeURIComponent(params.query)}&type=track&limit=${params.limit || 10}`, {
                 headers: { 'Authorization': `Bearer ${token.accessToken}` }
             });
             if (!response.ok) throw new Error('Search failed');
             const data = await response.json();
-            return (data.tracks?.items || []).map(t => ({
-                id: t.id, name: t.name, artist: t.artists?.map(a => a.name).join(', '),
-                album: t.album?.name, uri: t.uri, url: t.external_urls?.spotify, duration: t.duration_ms
-            }));
+            return (data.tracks?.items || []).map(t => ({ id: t.id, name: t.name, artist: t.artists?.map(a => a.name).join(', '), uri: t.uri }));
         },
 
-        async searchArtists(token, params) {
-            const limit = params.limit || 10;
-            const response = await fetch(`https://api.spotify.com/v1/search?q=${encodeURIComponent(params.query)}&type=artist&limit=${limit}`, {
-                headers: { 'Authorization': `Bearer ${token.accessToken}` }
-            });
-            if (!response.ok) throw new Error('Search failed');
-            const data = await response.json();
-            return (data.artists?.items || []).map(a => ({
-                id: a.id, name: a.name, genres: a.genres?.slice(0, 3),
-                followers: a.followers?.total, uri: a.uri, url: a.external_urls?.spotify
-            }));
-        },
-
-        async getRecentlyPlayed(token, params = {}) {
-            const limit = params.limit || 20;
-            const response = await fetch(`https://api.spotify.com/v1/me/player/recently-played?limit=${limit}`, {
+        async getRecentlyPlayed(token) {
+            const response = await fetch('https://api.spotify.com/v1/me/player/recently-played?limit=20', {
                 headers: { 'Authorization': `Bearer ${token.accessToken}` }
             });
             if (!response.ok) throw new Error('Failed to fetch');
             const data = await response.json();
-            return (data.items || []).map(i => ({
-                track: i.track?.name, artist: i.track?.artists?.map(a => a.name).join(', '),
-                playedAt: i.played_at, uri: i.track?.uri
-            }));
-        },
-
-        async getSavedTracks(token, params = {}) {
-            const limit = params.limit || 20;
-            const response = await fetch(`https://api.spotify.com/v1/me/tracks?limit=${limit}`, {
-                headers: { 'Authorization': `Bearer ${token.accessToken}` }
-            });
-            if (!response.ok) throw new Error('Failed to fetch');
-            const data = await response.json();
-            return (data.items || []).map(i => ({
-                name: i.track?.name, artist: i.track?.artists?.map(a => a.name).join(', '),
-                album: i.track?.album?.name, addedAt: i.added_at, uri: i.track?.uri
-            }));
+            return (data.items || []).map(i => ({ track: i.track?.name, artist: i.track?.artists?.map(a => a.name).join(', '), playedAt: i.played_at }));
         }
     },
 
     // ============================================
-    // TOOL IMPLEMENTATIONS - NOTION
+    // NOTION
     // ============================================
     notion: {
         async listDatabases(token) {
@@ -1126,26 +847,20 @@ const tools = {
                 headers: { 'Authorization': `Bearer ${token.accessToken}`, 'Notion-Version': '2022-06-28', 'Content-Type': 'application/json' },
                 body: JSON.stringify({ filter: { property: 'object', value: 'database' } })
             });
-            if (!response.ok) throw new Error('Failed to fetch databases');
+            if (!response.ok) throw new Error('Failed to fetch');
             const data = await response.json();
-            return (data.results || []).map(db => ({
-                id: db.id, title: db.title?.[0]?.plain_text || 'Untitled', url: db.url
-            }));
+            return (data.results || []).map(db => ({ id: db.id, title: db.title?.[0]?.plain_text || 'Untitled', url: db.url }));
         },
 
-        async listPages(token, params = {}) {
+        async listPages(token) {
             const response = await fetch('https://api.notion.com/v1/search', {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${token.accessToken}`, 'Notion-Version': '2022-06-28', 'Content-Type': 'application/json' },
-                body: JSON.stringify({ filter: { property: 'object', value: 'page' }, page_size: params.limit || 20 })
+                body: JSON.stringify({ filter: { property: 'object', value: 'page' } })
             });
-            if (!response.ok) throw new Error('Failed to fetch pages');
+            if (!response.ok) throw new Error('Failed to fetch');
             const data = await response.json();
-            return (data.results || []).map(p => ({
-                id: p.id,
-                title: p.properties?.title?.title?.[0]?.plain_text || p.properties?.Name?.title?.[0]?.plain_text || 'Untitled',
-                url: p.url, createdAt: p.created_time
-            }));
+            return (data.results || []).map(p => ({ id: p.id, url: p.url }));
         },
 
         async createPage(token, params) {
@@ -1166,86 +881,68 @@ const tools = {
             return { id: data.id, url: data.url };
         },
 
-        async queryDatabase(token, params) {
-            const body = {};
-            if (params.filter) body.filter = params.filter;
-            if (params.sorts) body.sorts = params.sorts;
-            const response = await fetch(`https://api.notion.com/v1/databases/${params.databaseId}/query`, {
-                method: 'POST',
-                headers: { 'Authorization': `Bearer ${token.accessToken}`, 'Notion-Version': '2022-06-28', 'Content-Type': 'application/json' },
-                body: JSON.stringify(body)
-            });
-            if (!response.ok) throw new Error('Failed to query database');
-            return await response.json();
-        },
-
         async search(token, params) {
             const response = await fetch('https://api.notion.com/v1/search', {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${token.accessToken}`, 'Notion-Version': '2022-06-28', 'Content-Type': 'application/json' },
-                body: JSON.stringify({ query: params.query, page_size: params.limit || 10 })
+                body: JSON.stringify({ query: params.query })
             });
             if (!response.ok) throw new Error('Search failed');
             const data = await response.json();
-            return (data.results || []).map(r => ({
-                id: r.id, type: r.object,
-                title: r.properties?.title?.title?.[0]?.plain_text || r.title?.[0]?.plain_text || 'Untitled',
-                url: r.url
-            }));
+            return (data.results || []).map(r => ({ id: r.id, type: r.object, url: r.url }));
         }
     },
 
     // ============================================
-    // TOOL IMPLEMENTATIONS - DISCORD
+    // DISCORD
     // ============================================
     discord: {
         async getUser(token) {
             const response = await fetch('https://discord.com/api/users/@me', {
                 headers: { 'Authorization': `Bearer ${token.accessToken}` }
             });
-            if (!response.ok) throw new Error('Failed to fetch user');
-            const data = await response.json();
-            return { id: data.id, username: data.username, discriminator: data.discriminator, email: data.email, avatar: data.avatar };
+            if (!response.ok) throw new Error('Failed to fetch');
+            return await response.json();
         },
 
         async getGuilds(token) {
             const response = await fetch('https://discord.com/api/users/@me/guilds', {
                 headers: { 'Authorization': `Bearer ${token.accessToken}` }
             });
-            if (!response.ok) throw new Error('Failed to fetch guilds');
+            if (!response.ok) throw new Error('Failed to fetch');
             const guilds = await response.json();
-            return guilds.map(g => ({ id: g.id, name: g.name, icon: g.icon, owner: g.owner, permissions: g.permissions }));
+            return guilds.map(g => ({ id: g.id, name: g.name, icon: g.icon, owner: g.owner }));
         }
     },
 
     // ============================================
-    // TOOL IMPLEMENTATIONS - SLACK
+    // SLACK
     // ============================================
     slack: {
         async getProfile(token) {
             const response = await fetch('https://slack.com/api/users.profile.get', {
                 headers: { 'Authorization': `Bearer ${token.accessToken}` }
             });
-            if (!response.ok) throw new Error('Failed to fetch profile');
+            if (!response.ok) throw new Error('Failed to fetch');
             return await response.json();
         },
 
         async listChannels(token) {
-            const response = await fetch('https://slack.com/api/conversations.list?types=public_channel,private_channel', {
+            const response = await fetch('https://slack.com/api/conversations.list', {
                 headers: { 'Authorization': `Bearer ${token.accessToken}` }
             });
-            if (!response.ok) throw new Error('Failed to fetch channels');
+            if (!response.ok) throw new Error('Failed to fetch');
             const data = await response.json();
-            return (data.channels || []).map(c => ({ id: c.id, name: c.name, isPrivate: c.is_private, memberCount: c.num_members }));
+            return (data.channels || []).map(c => ({ id: c.id, name: c.name }));
         },
 
         async sendMessage(token, params) {
             const response = await fetch('https://slack.com/api/chat.postMessage', {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${token.accessToken}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ channel: params.channel, text: params.text, blocks: params.blocks })
+                body: JSON.stringify({ channel: params.channel, text: params.text })
             });
-            if (!response.ok) throw new Error('Failed to send message');
+            if (!response.ok) throw new Error('Failed to send');
             return await response.json();
         },
 
@@ -1253,31 +950,30 @@ const tools = {
             const response = await fetch(`https://slack.com/api/conversations.history?channel=${params.channel}&limit=${params.limit || 20}`, {
                 headers: { 'Authorization': `Bearer ${token.accessToken}` }
             });
-            if (!response.ok) throw new Error('Failed to fetch messages');
+            if (!response.ok) throw new Error('Failed to fetch');
             return await response.json();
         }
     },
 
     // ============================================
-    // TOOL IMPLEMENTATIONS - TWITTER
+    // TWITTER
     // ============================================
     twitter: {
         async getProfile(token) {
-            const response = await fetch('https://api.twitter.com/2/users/me?user.fields=description,public_metrics,profile_image_url', {
+            const response = await fetch('https://api.twitter.com/2/users/me?user.fields=description,public_metrics', {
                 headers: { 'Authorization': `Bearer ${token.accessToken}` }
             });
-            if (!response.ok) throw new Error('Failed to fetch profile');
+            if (!response.ok) throw new Error('Failed to fetch');
             const data = await response.json();
             return data.data;
         },
 
         async getTweets(token, params = {}) {
             const profile = await this.getProfile(token);
-            const limit = params.limit || 10;
-            const response = await fetch(`https://api.twitter.com/2/users/${profile.id}/tweets?max_results=${limit}&tweet.fields=created_at,public_metrics`, {
+            const response = await fetch(`https://api.twitter.com/2/users/${profile.id}/tweets?max_results=${params.limit || 10}`, {
                 headers: { 'Authorization': `Bearer ${token.accessToken}` }
             });
-            if (!response.ok) throw new Error('Failed to fetch tweets');
+            if (!response.ok) throw new Error('Failed to fetch');
             const data = await response.json();
             return data.data || [];
         },
@@ -1288,45 +984,42 @@ const tools = {
                 headers: { 'Authorization': `Bearer ${token.accessToken}`, 'Content-Type': 'application/json' },
                 body: JSON.stringify({ text: params.text })
             });
-            if (!response.ok) throw new Error('Failed to post tweet');
+            if (!response.ok) throw new Error('Failed to post');
             return await response.json();
         },
 
-        async getFollowers(token, params = {}) {
+        async getFollowers(token) {
             const profile = await this.getProfile(token);
-            const response = await fetch(`https://api.twitter.com/2/users/${profile.id}/followers?max_results=${params.limit || 100}`, {
+            const response = await fetch(`https://api.twitter.com/2/users/${profile.id}/followers`, {
                 headers: { 'Authorization': `Bearer ${token.accessToken}` }
             });
-            if (!response.ok) throw new Error('Failed to fetch followers');
+            if (!response.ok) throw new Error('Failed to fetch');
             return await response.json();
         }
     },
 
     // ============================================
-    // TOOL IMPLEMENTATIONS - STRAVA
+    // STRAVA
     // ============================================
     strava: {
         async getAthlete(token) {
             const response = await fetch('https://www.strava.com/api/v3/athlete', {
                 headers: { 'Authorization': `Bearer ${token.accessToken}` }
             });
-            if (!response.ok) throw new Error('Failed to fetch athlete');
-            const data = await response.json();
-            return { id: data.id, firstname: data.firstname, lastname: data.lastname, city: data.city, country: data.country, followerCount: data.follower_count };
+            if (!response.ok) throw new Error('Failed to fetch');
+            return await response.json();
         },
 
         async getActivities(token, params = {}) {
-            const perPage = params.perPage || 30;
-            const response = await fetch(`https://www.strava.com/api/v3/athlete/activities?per_page=${perPage}`, {
+            const response = await fetch(`https://www.strava.com/api/v3/athlete/activities?per_page=${params.perPage || 30}`, {
                 headers: { 'Authorization': `Bearer ${token.accessToken}` }
             });
-            if (!response.ok) throw new Error('Failed to fetch activities');
+            if (!response.ok) throw new Error('Failed to fetch');
             const activities = await response.json();
             return activities.map(a => ({
                 id: a.id, name: a.name, type: a.type,
                 distance: (a.distance / 1000).toFixed(2) + ' km',
                 duration: Math.round(a.moving_time / 60) + ' min',
-                elevation: a.total_elevation_gain + ' m',
                 date: a.start_date_local
             }));
         },
@@ -1336,34 +1029,31 @@ const tools = {
             const response = await fetch(`https://www.strava.com/api/v3/athletes/${athlete.id}/stats`, {
                 headers: { 'Authorization': `Bearer ${token.accessToken}` }
             });
-            if (!response.ok) throw new Error('Failed to fetch stats');
+            if (!response.ok) throw new Error('Failed to fetch');
             return await response.json();
         }
     },
 
     // ============================================
-    // TOOL IMPLEMENTATIONS - DROPBOX
+    // DROPBOX
     // ============================================
     dropbox: {
         async listFiles(token, params = {}) {
-            const path = params.path || '';
             const response = await fetch('https://api.dropboxapi.com/2/files/list_folder', {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${token.accessToken}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ path, recursive: false, limit: 100 })
+                body: JSON.stringify({ path: params.path || '', limit: 100 })
             });
             if (!response.ok) throw new Error('Failed to list files');
             const data = await response.json();
-            return (data.entries || []).map(e => ({
-                name: e.name, path: e.path_display, type: e['.tag'], size: e.size, modified: e.server_modified
-            }));
+            return (data.entries || []).map(e => ({ name: e.name, path: e.path_display, type: e['.tag'], size: e.size }));
         },
 
         async createFolder(token, params) {
             const response = await fetch('https://api.dropboxapi.com/2/files/create_folder_v2', {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${token.accessToken}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ path: params.path, autorename: false })
+                body: JSON.stringify({ path: params.path })
             });
             if (!response.ok) throw new Error('Failed to create folder');
             return await response.json();
@@ -1374,37 +1064,32 @@ const tools = {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${token.accessToken}` }
             });
-            if (!response.ok) throw new Error('Failed to get space usage');
+            if (!response.ok) throw new Error('Failed to get space');
             const data = await response.json();
-            return {
-                used: (data.used / (1024 * 1024 * 1024)).toFixed(2) + ' GB',
-                allocated: (data.allocation?.allocated / (1024 * 1024 * 1024)).toFixed(2) + ' GB'
-            };
+            return { used: (data.used / 1e9).toFixed(2) + ' GB', allocated: (data.allocation?.allocated / 1e9).toFixed(2) + ' GB' };
         },
 
         async search(token, params) {
             const response = await fetch('https://api.dropboxapi.com/2/files/search_v2', {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${token.accessToken}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ query: params.query, options: { max_results: 20 } })
+                body: JSON.stringify({ query: params.query })
             });
             if (!response.ok) throw new Error('Search failed');
             const data = await response.json();
-            return (data.matches || []).map(m => ({
-                name: m.metadata?.metadata?.name, path: m.metadata?.metadata?.path_display
-            }));
+            return (data.matches || []).map(m => ({ name: m.metadata?.metadata?.name, path: m.metadata?.metadata?.path_display }));
         }
     },
 
     // ============================================
-    // TOOL IMPLEMENTATIONS - FITBIT
+    // FITBIT
     // ============================================
     fitbit: {
         async getProfile(token) {
             const response = await fetch('https://api.fitbit.com/1/user/-/profile.json', {
                 headers: { 'Authorization': `Bearer ${token.accessToken}` }
             });
-            if (!response.ok) throw new Error('Failed to fetch profile');
+            if (!response.ok) throw new Error('Failed to fetch');
             const data = await response.json();
             return data.user;
         },
@@ -1414,9 +1099,9 @@ const tools = {
             const response = await fetch(`https://api.fitbit.com/1/user/-/activities/date/${date}.json`, {
                 headers: { 'Authorization': `Bearer ${token.accessToken}` }
             });
-            if (!response.ok) throw new Error('Failed to fetch activity');
+            if (!response.ok) throw new Error('Failed to fetch');
             const data = await response.json();
-            return { date, steps: data.summary?.steps, calories: data.summary?.caloriesOut, distance: data.summary?.distances?.[0]?.distance, activeMinutes: data.summary?.veryActiveMinutes + data.summary?.fairlyActiveMinutes };
+            return { date, steps: data.summary?.steps, calories: data.summary?.caloriesOut };
         },
 
         async getSleepLog(token, params = {}) {
@@ -1424,10 +1109,9 @@ const tools = {
             const response = await fetch(`https://api.fitbit.com/1.2/user/-/sleep/date/${date}.json`, {
                 headers: { 'Authorization': `Bearer ${token.accessToken}` }
             });
-            if (!response.ok) throw new Error('Failed to fetch sleep');
+            if (!response.ok) throw new Error('Failed to fetch');
             const data = await response.json();
-            const summary = data.summary;
-            return { date, totalSleep: summary?.totalMinutesAsleep, deepSleep: summary?.stages?.deep, remSleep: summary?.stages?.rem, lightSleep: summary?.stages?.light };
+            return { date, totalSleep: data.summary?.totalMinutesAsleep };
         },
 
         async getHeartRate(token, params = {}) {
@@ -1435,22 +1119,9 @@ const tools = {
             const response = await fetch(`https://api.fitbit.com/1/user/-/activities/heart/date/${date}/1d.json`, {
                 headers: { 'Authorization': `Bearer ${token.accessToken}` }
             });
-            if (!response.ok) throw new Error('Failed to fetch heart rate');
+            if (!response.ok) throw new Error('Failed to fetch');
             const data = await response.json();
             return { date, restingHeartRate: data['activities-heart']?.[0]?.value?.restingHeartRate };
-        }
-    },
-
-    // ============================================
-    // TOOL IMPLEMENTATIONS - LINKEDIN
-    // ============================================
-    linkedin: {
-        async getProfile(token) {
-            const response = await fetch('https://api.linkedin.com/v2/me', {
-                headers: { 'Authorization': `Bearer ${token.accessToken}` }
-            });
-            if (!response.ok) throw new Error('Failed to fetch profile');
-            return await response.json();
         }
     }
 };
@@ -1462,112 +1133,50 @@ const aiTools = {
     async generateCode(params) {
         const prompt = `Generate production-ready ${params.language || 'TypeScript'} code for: ${params.description}
 
-${params.context ? `Context: ${params.context}` : ''}
-
 Requirements:
-- Clean, well-documented code with comments
-- Follow best practices for the language
-- Include proper error handling
-- Be complete and immediately usable
+- Clean, well-documented code
+- Follow best practices
+- Include comments
+- Be complete and functional
 
 Return ONLY valid JSON:
 {
     "filename": "suggested_filename.ext",
     "content": "the complete code here",
-    "explanation": "brief explanation of what the code does"
+    "explanation": "brief explanation"
 }`;
         return await think(prompt, { jsonMode: true, temperature: 0.3 });
     },
 
     async generateProject(params) {
-        const prompt = `Generate a complete ${params.type || 'Node.js'} project structure for: ${params.name}
+        const prompt = `Generate a complete ${params.type || 'Node.js'} project for: ${params.name}
 
 Description: ${params.description || 'A new project'}
 
-Create a full project with all necessary files. Return ONLY valid JSON:
+Return ONLY valid JSON:
 {
     "files": [
-        { "path": "relative/path/to/file.ext", "content": "complete file content" }
+        { "path": "relative/path/file.ext", "content": "file content" }
     ],
     "description": "Project description",
-    "setupInstructions": "How to set up and run"
-}
-
-Include at minimum:
-- README.md with documentation
-- Package configuration (package.json, etc.)
-- Main entry point file
-- Basic project structure`;
+    "setupInstructions": "How to run"
+}`;
         return await think(prompt, { jsonMode: true, temperature: 0.4 });
     },
 
     async analyzeData(params) {
-        const prompt = `Analyze this data and answer the question:
-
-Data: ${JSON.stringify(params.data)}
-
-Question: ${params.question}
-
-Provide clear insights, patterns, and actionable recommendations.`;
+        const prompt = `Analyze this data: ${JSON.stringify(params.data)}\n\nQuestion: ${params.question}\n\nProvide insights and recommendations.`;
         return await think(prompt, { temperature: 0.5 });
     },
 
     async summarize(params) {
-        const maxLength = params.maxLength || 200;
-        const prompt = `Summarize the following in ${maxLength} words or less:\n\n${params.text}`;
+        const prompt = `Summarize in ${params.maxLength || 200} words or less:\n\n${params.text}`;
         return await think(prompt, { temperature: 0.3 });
     },
 
     async translate(params) {
         const prompt = `Translate to ${params.targetLanguage}:\n\n${params.text}\n\nProvide only the translation.`;
         return await think(prompt, { temperature: 0.2 });
-    },
-
-    async explain(params) {
-        const level = params.level || 'intermediate';
-        const prompt = `Explain ${params.topic} at a ${level} level. Be clear and use examples.`;
-        return await think(prompt, { temperature: 0.5 });
-    },
-
-    async writeContent(params) {
-        const prompt = `Write ${params.type || 'content'} about: ${params.topic}
-
-Tone: ${params.tone || 'professional'}
-Length: ${params.length || 'medium'}
-
-Create engaging, well-structured content.`;
-        return await think(prompt, { temperature: 0.7 });
-    },
-
-    async refactorCode(params) {
-        const prompt = `Refactor this ${params.language || ''} code with these improvements: ${params.improvements || 'general cleanup'}
-
-Code:
-${params.code}
-
-Return the improved code with explanations of changes.`;
-        return await think(prompt, { temperature: 0.3 });
-    },
-
-    async reviewCode(params) {
-        const prompt = `Review this ${params.language || ''} code:
-
-${params.code}
-
-Provide:
-1. Issues found (bugs, security, performance)
-2. Suggestions for improvement
-3. Overall quality assessment`;
-        return await think(prompt, { temperature: 0.4 });
-    },
-
-    async generateTests(params) {
-        const prompt = `Generate ${params.framework || 'Jest'} tests for this ${params.language || 'JavaScript'} code:
-
-${params.code}
-
-Include unit tests covering main functionality, edge cases, and error handling.`;
-        return await think(prompt, { jsonMode: false, temperature: 0.3 });
     }
 };
 
@@ -1575,7 +1184,7 @@ Include unit tests covering main functionality, edge cases, and error handling.`
 // STEP EXECUTOR
 // ============================================
 async function executeStep(step, email, previousResults, connectedPlatforms) {
-    console.log(`Executing step ${step.stepNumber}: ${step.tool}.${step.action}`);
+    console.log(`[Execute] Step ${step.stepNumber}: ${step.tool}.${step.action}`);
     try {
         // Handle AI tools
         if (step.tool === 'ai') {
@@ -1597,7 +1206,7 @@ async function executeStep(step, email, previousResults, connectedPlatforms) {
         
         return await action(token, resolvedParams);
     } catch (error) {
-        console.error(`Step ${step.stepNumber} failed:`, error.message);
+        console.error(`[Execute] Step ${step.stepNumber} failed:`, error.message);
         return { error: error.message, step: step.stepNumber };
     }
 }
@@ -1608,7 +1217,6 @@ function resolveParams(params, previousResults) {
     
     for (const [key, value] of Object.entries(params)) {
         if (typeof value === 'string' && value.startsWith('$step')) {
-            // Handle $step1.fieldName references
             const match = value.match(/\$step(\d+)\.?(.*)/);
             if (match) {
                 const stepNum = parseInt(match[1]);
@@ -1636,7 +1244,6 @@ async function executePlan(plan, email, connectedPlatforms) {
     const executionLog = [];
     
     for (const step of plan.steps || []) {
-        // Check dependencies
         if (step.dependsOn) {
             const deps = Array.isArray(step.dependsOn) ? step.dependsOn : [step.dependsOn];
             const failed = deps.some(dep => results[dep]?.error);
@@ -1662,7 +1269,7 @@ async function executePlan(plan, email, connectedPlatforms) {
             error: result.error
         });
         
-        console.log(`Step ${step.stepNumber} ${result.error ? 'failed' : 'completed'} in ${duration}ms`);
+        console.log(`[Execute] Step ${step.stepNumber} ${result.error ? 'FAILED' : 'SUCCESS'} in ${duration}ms`);
     }
     
     return { results, executionLog };
@@ -1673,7 +1280,6 @@ async function executePlan(plan, email, connectedPlatforms) {
 // ============================================
 function parseSchedule(scheduleString) {
     const lower = scheduleString.toLowerCase();
-    
     if (lower.includes('every') && lower.includes('minute')) {
         const match = lower.match(/every\s+(\d+)\s+minute/);
         return { type: 'interval', minutes: match ? parseInt(match[1]) : 1 };
@@ -1682,7 +1288,7 @@ function parseSchedule(scheduleString) {
         const match = lower.match(/every\s+(\d+)\s+hour/);
         return { type: 'interval', minutes: (match ? parseInt(match[1]) : 1) * 60 };
     }
-    if (lower.includes('daily') || lower.includes('every day')) {
+    if (lower.includes('daily')) {
         const timeMatch = lower.match(/at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
         let hour = timeMatch ? parseInt(timeMatch[1]) : 9;
         if (timeMatch?.[3]?.toLowerCase() === 'pm' && hour < 12) hour += 12;
@@ -1693,13 +1299,11 @@ function parseSchedule(scheduleString) {
         const dayIndex = days.findIndex(d => lower.includes(d));
         return { type: 'weekly', day: dayIndex >= 0 ? dayIndex : 1, hour: 9, minute: 0 };
     }
-    
     return { type: 'interval', minutes: 60 };
 }
 
 function getNextRunTime(parsedSchedule) {
     const now = new Date();
-    
     if (parsedSchedule.type === 'interval') {
         return new Date(now.getTime() + parsedSchedule.minutes * 60 * 1000);
     }
@@ -1716,60 +1320,37 @@ function getNextRunTime(parsedSchedule) {
         next.setHours(parsedSchedule.hour, parsedSchedule.minute, 0, 0);
         return next;
     }
-    
     return new Date(now.getTime() + 60 * 60 * 1000);
 }
 
 async function runAutomation(automation, email) {
-    console.log(`Running automation: ${automation.name}`);
-    
+    console.log(`[Automation] Running: ${automation.name}`);
     try {
         const user = await User.findOne({ email });
-        const connectedPlatforms = user?.connectedAccounts?.map(a => a.platform.toLowerCase()) || [];
-        
+        const connectedPlatforms = getConnectedPlatforms(user);
         const plan = await planExecution(automation.task, connectedPlatforms, { automationRun: true });
-        
-        if (!plan.canComplete) {
-            return { success: false, error: 'Cannot complete automation', missing: plan.missingPlatforms };
-        }
-        
+        if (!plan.canComplete) return { success: false, error: 'Cannot complete', missing: plan.missingPlatforms };
         const { results, executionLog } = await executePlan(plan, email, connectedPlatforms);
-        
-        automationResults.set(automation.id, {
-            lastRun: new Date(),
-            success: !executionLog.some(l => l.status === 'failed'),
-            results,
-            executionLog
-        });
-        
-        await User.updateOne(
-            { email, 'automations.id': automation.id },
-            { $set: { 'automations.$.lastRun': new Date(), 'automations.$.lastResult': { success: true, summary: `Completed ${executionLog.length} steps` } } }
-        );
-        
+        automationResults.set(automation.id, { lastRun: new Date(), success: !executionLog.some(l => l.status === 'failed'), results, executionLog });
+        await User.updateOne({ email, 'automations.id': automation.id }, { $set: { 'automations.$.lastRun': new Date(), 'automations.$.lastResult': { success: true, summary: `Completed ${executionLog.length} steps` } } });
         return { success: true, results, executionLog };
     } catch (error) {
-        console.error(`Automation error: ${error.message}`);
+        console.error(`[Automation] Error: ${error.message}`);
         return { success: false, error: error.message };
     }
 }
 
 function scheduleAutomation(automationId, email, schedule, task, name) {
-    if (runningAutomations.has(automationId)) {
-        clearTimeout(runningAutomations.get(automationId).timeout);
-    }
-    
+    if (runningAutomations.has(automationId)) clearTimeout(runningAutomations.get(automationId).timeout);
     const parsedSchedule = parseSchedule(schedule);
     const nextRun = getNextRunTime(parsedSchedule);
     const msUntilRun = Math.min(nextRun.getTime() - Date.now(), 2147483647);
-    
     const timeout = setTimeout(async () => {
         await runAutomation({ id: automationId, name, task }, email);
         scheduleAutomation(automationId, email, schedule, task, name);
     }, msUntilRun);
-    
     runningAutomations.set(automationId, { timeout, email, schedule, task, name, nextRun });
-    console.log(`Scheduled automation "${name}" for ${nextRun.toISOString()}`);
+    console.log(`[Automation] Scheduled "${name}" for ${nextRun.toISOString()}`);
 }
 
 function stopAutomation(automationId) {
@@ -1789,34 +1370,30 @@ function formatResult(action, data) {
     if (data?.skipped) return `⏭️ Skipped: ${data.reason}`;
     
     const formatters = {
-        'github.listRepos': () => data?.length ? `📁 Found ${data.length} repositories:\n${data.slice(0, 5).map(r => `• ${r.name} (${r.language || 'Unknown'}) ⭐${r.stars}`).join('\n')}` : 'No repositories found',
-        'github.createRepo': () => `✅ Created repository: **${data.name}**\n🔗 ${data.url}${data.private ? ' (Private)' : ''}`,
+        'github.listRepos': () => data?.length ? `📁 Found ${data.length} repos:\n${data.slice(0, 5).map(r => `• ${r.name} (${r.language || '?'}) ⭐${r.stars}`).join('\n')}` : 'No repos found',
+        'github.createRepo': () => `✅ Created repo: **${data.name}**\n🔗 ${data.url}${data.private ? ' (Private)' : ''}`,
         'github.createFile': () => `✅ Created file: ${data.path}\n🔗 ${data.url}`,
-        'github.updateFile': () => `✅ Updated file: ${data.path}\n🔗 ${data.url}`,
+        'github.updateFile': () => `✅ Updated file: ${data.path}`,
         'github.deleteFile': () => `✅ Deleted: ${data.deleted}`,
-        'github.listFiles': () => data?.length ? `📂 Files:\n${data.map(f => `${f.type === 'dir' ? '📁' : '📄'} ${f.name}`).join('\n')}` : 'No files found',
-        'github.getFileContent': () => `📄 ${data.name} (${data.size} bytes):\n\`\`\`\n${data.content?.slice(0, 500)}${data.content?.length > 500 ? '...' : ''}\n\`\`\``,
-        'shopify.getProducts': () => data?.length ? `🛍️ ${data.length} products:\n${data.slice(0, 5).map(p => `• ${p.title} - $${p.price}`).join('\n')}` : 'No products',
-        'shopify.createProduct': () => `✅ Created product: ${data.title} (ID: ${data.id})`,
-        'shopify.getAnalytics': () => `📊 Analytics:\n• Revenue: $${data.totalRevenue}\n• Orders: ${data.totalOrders}\n• Avg Order: $${data.averageOrderValue}\n• Products: ${data.totalProducts}`,
-        'shopify.getInventory': () => `📦 Inventory:\n• Total Products: ${data.totalProducts}\n• Low Stock: ${data.lowStockCount}\n• Out of Stock: ${data.outOfStockCount}`,
-        'spotify.getCurrentlyPlaying': () => data.playing ? `🎵 Now playing: **${data.track}** by ${data.artist}` : '⏸️ Nothing currently playing',
-        'spotify.getTopTracks': () => data?.length ? `🎵 Top tracks:\n${data.slice(0, 5).map((t, i) => `${i + 1}. ${t.name} - ${t.artist}`).join('\n')}` : 'No top tracks',
-        'spotify.createPlaylist': () => `✅ Created playlist: **${data.name}**\n🔗 ${data.url}`,
-        'google.listCalendarEvents': () => data?.length ? `📅 Upcoming events:\n${data.slice(0, 5).map(e => `• ${e.title} - ${new Date(e.start).toLocaleDateString()}`).join('\n')}` : 'No upcoming events',
+        'github.listFiles': () => data?.length ? `📂 ${data.length} files:\n${data.map(f => `${f.type === 'dir' ? '📁' : '📄'} ${f.name}`).join('\n')}` : 'No files',
+        'shopify.getProducts': () => data?.length ? `🛍️ ${data.length} products` : 'No products',
+        'shopify.createProduct': () => `✅ Created: ${data.title}`,
+        'shopify.getAnalytics': () => `📊 Revenue: $${data.totalRevenue}, Orders: ${data.totalOrders}`,
+        'spotify.getCurrentlyPlaying': () => data.playing ? `🎵 Playing: **${data.track}** by ${data.artist}` : '⏸️ Nothing playing',
+        'spotify.getTopTracks': () => data?.length ? `🎵 Top tracks:\n${data.slice(0, 5).map(t => `${t.rank}. ${t.name} - ${t.artist}`).join('\n')}` : 'No tracks',
+        'spotify.createPlaylist': () => `✅ Created playlist: **${data.name}**`,
+        'google.listCalendarEvents': () => data?.length ? `📅 ${data.length} events` : 'No events',
         'google.createCalendarEvent': () => `✅ Created event: ${data.title}`,
-        'google.sendEmail': () => `✅ Email sent! (ID: ${data.messageId})`,
-        'notion.listDatabases': () => data?.length ? `📚 Databases:\n${data.map(d => `• ${d.title}`).join('\n')}` : 'No databases',
-        'strava.getActivities': () => data?.length ? `🏃 Activities:\n${data.slice(0, 5).map(a => `• ${a.name} - ${a.type}, ${a.distance}`).join('\n')}` : 'No activities',
-        'ai.generateCode': () => `✅ Generated ${data.filename}:\n\`\`\`\n${data.content?.slice(0, 300)}...\n\`\`\``,
+        'google.sendEmail': () => `✅ Email sent!`,
+        'notion.listDatabases': () => data?.length ? `📚 ${data.length} databases` : 'No databases',
+        'ai.generateCode': () => `✅ Generated: ${data.filename}`,
         'ai.generateProject': () => `✅ Generated project with ${data.files?.length || 0} files`
     };
     
     const formatter = formatters[action];
     if (formatter) return formatter();
-    
     if (Array.isArray(data)) return `✅ Retrieved ${data.length} items`;
-    if (data?.success) return `✅ ${data.message || 'Action completed'}`;
+    if (data?.success) return `✅ ${data.message || 'Done'}`;
     if (typeof data === 'string') return data;
     return `✅ Completed`;
 }
@@ -1825,33 +1402,29 @@ function formatResult(action, data) {
 // API ROUTES
 // ============================================
 
-// Main chat endpoint - autonomous execution
+// Main chat endpoint
 router.post('/chat', async (req, res) => {
     try {
-        const { email, message, connectedPlatforms = [], userName = 'User', history = [], goal } = req.body;
+        const { email, message, connectedPlatforms = [], userName = 'User', goal } = req.body;
         
         if (!email || !message) {
             return res.status(400).json({ error: 'Email and message required' });
         }
         
         const user = await User.findOne({ email });
-        const actualPlatforms = user?.connectedAccounts?.filter(a => a.accessToken)?.map(a => a.platform.toLowerCase()) || connectedPlatforms;
+        const actualPlatforms = getConnectedPlatforms(user);
         
-        const userContext = { userName, goal, connectedPlatforms: actualPlatforms };
-        
-        console.log(`\n${'='.repeat(50)}\nMaster Agent: "${message}" for ${email}\nPlatforms: ${actualPlatforms.join(', ') || 'None'}\n${'='.repeat(50)}`);
+        console.log(`\n${'='.repeat(50)}\n[MasterAgent] "${message}"\n[Email] ${email}\n[Platforms] ${actualPlatforms.join(', ') || 'None'}\n${'='.repeat(50)}`);
         
         // Plan execution
-        const plan = await planExecution(message, actualPlatforms, userContext);
-        console.log('Plan:', JSON.stringify(plan, null, 2));
+        const plan = await planExecution(message, actualPlatforms, { userName, goal });
+        console.log('[Plan]', JSON.stringify(plan, null, 2));
         
         // Check if we can complete
         if (!plan.canComplete && plan.missingPlatforms?.length) {
             return res.json({
                 response: `I'd love to help with that! However, I need access to: **${plan.missingPlatforms.join(', ')}**.\n\nPlease connect these platforms in the Settings tab, then try again.`,
-                plan,
-                toolsUsed: [],
-                needsConnection: plan.missingPlatforms
+                plan, toolsUsed: [], needsConnection: plan.missingPlatforms
             });
         }
         
@@ -1860,7 +1433,7 @@ router.post('/chat', async (req, res) => {
         let toolsUsed = [];
         
         if (plan.steps?.length) {
-            console.log(`Executing ${plan.steps.length} steps...`);
+            console.log(`[Execute] Running ${plan.steps.length} steps...`);
             executionResult = await executePlan(plan, email, actualPlatforms);
             toolsUsed = plan.steps.map(s => `${s.tool}.${s.action}`);
         }
@@ -1879,13 +1452,9 @@ router.post('/chat', async (req, res) => {
         const hasErrors = executionResult?.executionLog?.some(l => l.status === 'failed');
         const responsePrompt = `You are a helpful AI assistant. The user asked: "${message}"
 
-${executionResult ? `I executed the following actions:
+${executionResult ? `I executed these actions:\n\n${resultSummary}\n\n${hasErrors ? 'Some steps had errors.' : 'All steps completed!'}` : 'No actions needed.'}
 
-${resultSummary}
-
-${hasErrors ? 'Some steps encountered errors.' : 'All steps completed successfully.'}` : 'I analyzed your request but no actions were needed.'}
-
-Provide a natural, friendly response. Be concise but informative. If actions were taken, confirm what was done. If there were errors, explain them helpfully and suggest solutions.`;
+Provide a natural, friendly response. Be concise. Confirm what was done.`;
 
         const aiResponse = await think(responsePrompt, { temperature: 0.7 });
         
@@ -1898,17 +1467,17 @@ Provide a natural, friendly response. Be concise but informative. If actions wer
         });
         
     } catch (error) {
-        console.error('Chat error:', error);
+        console.error('[Chat Error]', error);
         res.status(500).json({ error: error.message });
     }
 });
 
-// Execute a pending plan
+// Execute pending plan
 router.post('/execute-plan', async (req, res) => {
     try {
         const { email, plan } = req.body;
         const user = await User.findOne({ email });
-        const connectedPlatforms = user?.connectedAccounts?.map(a => a.platform.toLowerCase()) || [];
+        const connectedPlatforms = getConnectedPlatforms(user);
         const { results, executionLog } = await executePlan(plan, email, connectedPlatforms);
         res.json({ success: true, results, executionLog });
     } catch (error) {
@@ -1947,41 +1516,38 @@ router.post('/execute', async (req, res) => {
     }
 });
 
-// Get available actions for user
+// Get available actions (FIXED - checks both arrays)
 router.get('/actions/:email', async (req, res) => {
     try {
         const { email } = req.params;
         const user = await User.findOne({ email });
         
-        const connectedPlatforms = user?.connectedAccounts?.filter(a => a.accessToken)?.map(a => a.platform.toLowerCase()) || [];
+        const connectedPlatforms = getConnectedPlatforms(user);
+        
+        console.log(`[Actions] ${email} has platforms: ${connectedPlatforms.join(', ') || 'None'}`);
         
         const availableActions = [
-            { tool: 'ai', action: 'generateCode', description: 'Generate code in any language' },
-            { tool: 'ai', action: 'generateProject', description: 'Generate complete project structure' },
-            { tool: 'ai', action: 'analyzeData', description: 'Analyze data and provide insights' },
+            { tool: 'ai', action: 'generateCode', description: 'Generate code' },
+            { tool: 'ai', action: 'generateProject', description: 'Generate project' },
+            { tool: 'ai', action: 'analyzeData', description: 'Analyze data' },
             { tool: 'ai', action: 'summarize', description: 'Summarize text' },
-            { tool: 'ai', action: 'translate', description: 'Translate text' },
-            { tool: 'ai', action: 'explain', description: 'Explain a concept' },
-            { tool: 'ai', action: 'writeContent', description: 'Write content' },
-            { tool: 'ai', action: 'reviewCode', description: 'Review code quality' }
+            { tool: 'ai', action: 'translate', description: 'Translate text' }
         ];
         
         const platformActions = {
             github: [
                 { action: 'listRepos', description: 'List repositories' },
                 { action: 'createRepo', description: 'Create repository' },
-                { action: 'listFiles', description: 'List files in repo' },
+                { action: 'listFiles', description: 'List files' },
                 { action: 'createFile', description: 'Create file' },
                 { action: 'updateFile', description: 'Update file' },
                 { action: 'deleteFile', description: 'Delete file' },
                 { action: 'listIssues', description: 'List issues' },
-                { action: 'createIssue', description: 'Create issue' },
-                { action: 'getRepoStats', description: 'Get repo statistics' }
+                { action: 'createIssue', description: 'Create issue' }
             ],
             google: [
-                { action: 'listCalendarEvents', description: 'List calendar events' },
-                { action: 'createCalendarEvent', description: 'Create calendar event' },
-                { action: 'listEmails', description: 'List emails' },
+                { action: 'listCalendarEvents', description: 'List events' },
+                { action: 'createCalendarEvent', description: 'Create event' },
                 { action: 'sendEmail', description: 'Send email' },
                 { action: 'listDriveFiles', description: 'List Drive files' }
             ],
@@ -1990,8 +1556,7 @@ router.get('/actions/:email', async (req, res) => {
                 { action: 'createProduct', description: 'Create product' },
                 { action: 'getOrders', description: 'List orders' },
                 { action: 'getAnalytics', description: 'Get analytics' },
-                { action: 'getInventory', description: 'Check inventory' },
-                { action: 'createDiscount', description: 'Create discount' }
+                { action: 'getInventory', description: 'Check inventory' }
             ],
             spotify: [
                 { action: 'getCurrentlyPlaying', description: 'Now playing' },
@@ -2000,14 +1565,14 @@ router.get('/actions/:email', async (req, res) => {
                 { action: 'createPlaylist', description: 'Create playlist' },
                 { action: 'playTrack', description: 'Play' },
                 { action: 'pauseTrack', description: 'Pause' },
-                { action: 'nextTrack', description: 'Next track' },
-                { action: 'searchTracks', description: 'Search tracks' }
+                { action: 'nextTrack', description: 'Next' },
+                { action: 'searchTracks', description: 'Search' }
             ],
             notion: [
                 { action: 'listDatabases', description: 'List databases' },
                 { action: 'listPages', description: 'List pages' },
                 { action: 'createPage', description: 'Create page' },
-                { action: 'search', description: 'Search Notion' }
+                { action: 'search', description: 'Search' }
             ],
             discord: [
                 { action: 'getUser', description: 'Get profile' },
@@ -2019,21 +1584,17 @@ router.get('/actions/:email', async (req, res) => {
             ],
             twitter: [
                 { action: 'getProfile', description: 'Get profile' },
-                { action: 'getTweets', description: 'Get tweets' },
                 { action: 'postTweet', description: 'Post tweet' }
             ],
             strava: [
-                { action: 'getAthlete', description: 'Get profile' },
                 { action: 'getActivities', description: 'List activities' },
                 { action: 'getStats', description: 'Get stats' }
             ],
             dropbox: [
                 { action: 'listFiles', description: 'List files' },
-                { action: 'createFolder', description: 'Create folder' },
-                { action: 'getSpaceUsage', description: 'Check storage' }
+                { action: 'createFolder', description: 'Create folder' }
             ],
             fitbit: [
-                { action: 'getProfile', description: 'Get profile' },
                 { action: 'getActivitySummary', description: 'Activity summary' },
                 { action: 'getSleepLog', description: 'Sleep data' }
             ]
@@ -2059,20 +1620,16 @@ router.get('/actions/:email', async (req, res) => {
 router.post('/automations', async (req, res) => {
     try {
         const { email, name, description, task, schedule } = req.body;
-        
         if (!email || !name || !task || !schedule) {
             return res.status(400).json({ error: 'Email, name, task, and schedule required' });
         }
-        
         const automationId = `auto_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
         const automation = {
             id: automationId, name, description: description || '', task, schedule,
             enabled: true, createdAt: new Date(), nextRun: getNextRunTime(parseSchedule(schedule)), lastRun: null, lastResult: null
         };
-        
         await User.updateOne({ email }, { $push: { automations: automation } });
         scheduleAutomation(automationId, email, schedule, task, name);
-        
         res.json({ success: true, automation });
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -2097,7 +1654,6 @@ router.put('/automations/:id', async (req, res) => {
     try {
         const { id } = req.params;
         const { email, enabled, name, task, schedule } = req.body;
-        
         const updateFields = {};
         if (name !== undefined) updateFields['automations.$.name'] = name;
         if (task !== undefined) updateFields['automations.$.task'] = task;
@@ -2106,17 +1662,13 @@ router.put('/automations/:id', async (req, res) => {
             updateFields['automations.$.nextRun'] = getNextRunTime(parseSchedule(schedule));
         }
         if (enabled !== undefined) updateFields['automations.$.enabled'] = enabled;
-        
         await User.updateOne({ email, 'automations.id': id }, { $set: updateFields });
-        
-        if (enabled === false) {
-            stopAutomation(id);
-        } else if (enabled === true || schedule) {
+        if (enabled === false) stopAutomation(id);
+        else if (enabled === true || schedule) {
             const user = await User.findOne({ email, 'automations.id': id });
             const auto = user?.automations?.find(a => a.id === id);
             if (auto?.enabled) scheduleAutomation(id, email, auto.schedule, auto.task, auto.name);
         }
-        
         res.json({ success: true });
     } catch (error) {
         res.status(500).json({ error: error.message });
